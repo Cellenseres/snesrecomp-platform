@@ -151,6 +151,60 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
     endif()
     string(REPLACE "${_renderer_old}" "${_renderer_new}"
         _imgui_patched "${_imgui_source}")
+
+    # Restore the model's existing widescreen control in both display layouts.
+    set(_legacy_fullscreen_old [=[
+        row_label("Fullscreen", th, cw);
+        ImGui::PushID("fullscreen");
+        if (ImGui::Button(launcher_model_fullscreen_label(m), ImVec2(px(120), px(30))))
+            launcher_model_cycle_fullscreen(m);
+        ImGui::PopID();
+]=])
+    set(_legacy_fullscreen_new [=[
+        row_label("Fullscreen", th, cw);
+        ImGui::PushID("fullscreen");
+        if (ImGui::Button(launcher_model_fullscreen_label(m), ImVec2(px(120), px(30))))
+            launcher_model_cycle_fullscreen(m);
+        ImGui::PopID();
+        if (m->widescreen_supported) {
+            row_label("Widescreen", th, cw);
+            bool widescreen = m->s.widescreen != 0;
+            if (ImGui::Checkbox("##widescreen", &widescreen))
+                launcher_model_toggle_widescreen(m);
+        }
+]=])
+    string(FIND "${_imgui_patched}" "${_legacy_fullscreen_old}"
+        _legacy_fullscreen_pos)
+    if(_legacy_fullscreen_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui legacy fullscreen context changed.")
+    endif()
+    string(REPLACE "${_legacy_fullscreen_old}" "${_legacy_fullscreen_new}"
+        _imgui_patched "${_imgui_patched}")
+
+    set(_deep_supersampling_marker [=[
+    if (m->has_supersampling) {
+]=])
+    set(_deep_widescreen_replacement [=[
+    if (m->widescreen_supported) {
+        row_label("Widescreen", th);
+        bool widescreen = m->s.widescreen != 0;
+        if (ImGui::Checkbox("##widescreen", &widescreen))
+            launcher_model_toggle_widescreen(m);
+    }
+
+    if (m->has_supersampling) {
+]=])
+    string(FIND "${_imgui_patched}" "${_deep_supersampling_marker}"
+        _deep_supersampling_pos)
+    if(_deep_supersampling_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui deep display context changed.")
+    endif()
+    string(REPLACE
+        "${_deep_supersampling_marker}" "${_deep_widescreen_replacement}"
+        _imgui_patched "${_imgui_patched}")
+
     file(MAKE_DIRECTORY "${_generated_root}/common/backends/imgui")
     file(WRITE "${_imgui_overlay}" "${_imgui_patched}")
     set_source_files_properties("${_imgui_overlay}" PROPERTIES
