@@ -30,9 +30,16 @@ struct SnesRecompPresenter {
     uint32_t capabilities;
     int frame_width;
     int frame_height;
+    int pixel_aspect_numerator;
+    int pixel_aspect_denominator;
+    SnesRecompVSyncState vsync_state;
     char backend_name[64];
     char last_error[256];
 };
+
+int snesrecomp_presenter_display_width(
+    const SnesRecompPresenter *presenter,
+    int frame_width);
 
 void snesrecomp_presenter_set_error(
     SnesRecompPresenter *presenter,

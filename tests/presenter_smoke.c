@@ -28,6 +28,8 @@ int main(int argc, char **argv) {
     config.frame_width = 4;
     config.frame_height = 4;
     config.window_scale = 1;
+    config.pixel_aspect_numerator = 2;
+    config.pixel_aspect_denominator = 1;
     config.preserve_aspect = true;
 
     char error[256];
@@ -66,6 +68,17 @@ int main(int argc, char **argv) {
         result = fail(snesrecomp_presenter_last_error(presenter));
     } else if (drawable_width <= 0 || drawable_height <= 0) {
         result = fail("drawable dimensions are invalid");
+    } else if (drawable_width != drawable_height * 2) {
+        result = fail("pixel aspect was not applied to the drawable");
+    }
+
+    const SnesRecompVSyncState vsync_state =
+        snesrecomp_presenter_vsync_state(presenter);
+    if (result == 0 &&
+        (unsigned)vsync_state > (unsigned)SNESRECOMP_VSYNC_UNSUPPORTED) {
+        result = fail("VSync state is invalid");
+    } else if (result == 0 && !snesrecomp_vsync_state_name(vsync_state)[0]) {
+        result = fail("VSync state name is empty");
     }
 
     snesrecomp_presenter_destroy(presenter);

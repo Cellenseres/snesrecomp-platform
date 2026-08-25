@@ -11,7 +11,7 @@ library takes care of presenting it.
 
 - SDL accelerated and software output
 - OpenGL 3.3 output
-- aspect-ratio handling, scaling, fullscreen and filtering
+- pixel-aspect handling, scaling, fullscreen, filtering and VSync reporting
 - optional GLSL/GLSLP shader presets
 - clear capability reporting and error messages
 - an SDL-free runtime-policy target for shared host behavior

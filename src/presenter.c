@@ -1,5 +1,6 @@
 #include "snesrecomp_platform/presenter.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,18 @@ bool snesrecomp_presenter_create(
 
     presenter->frame_width = config->frame_width;
     presenter->frame_height = config->frame_height;
+    if (config->preserve_aspect &&
+        config->pixel_aspect_numerator > 0 &&
+        config->pixel_aspect_denominator > 0) {
+        presenter->pixel_aspect_numerator =
+            config->pixel_aspect_numerator;
+        presenter->pixel_aspect_denominator =
+            config->pixel_aspect_denominator;
+    } else {
+        presenter->pixel_aspect_numerator = 1;
+        presenter->pixel_aspect_denominator = 1;
+    }
+    presenter->vsync_state = SNESRECOMP_VSYNC_UNKNOWN;
 
     bool created = false;
     switch (config->backend) {
@@ -120,6 +133,21 @@ bool snesrecomp_presenter_create(
     write_error(error, error_size, "");
     *out_presenter = presenter;
     return true;
+}
+
+int snesrecomp_presenter_display_width(
+    const SnesRecompPresenter *presenter,
+    int frame_width) {
+    if (!presenter || frame_width <= 0)
+        return frame_width;
+    const int64_t scaled =
+        (int64_t)frame_width * presenter->pixel_aspect_numerator;
+    const int64_t width =
+        (scaled + presenter->pixel_aspect_denominator / 2) /
+        presenter->pixel_aspect_denominator;
+    if (width <= 0)
+        return 1;
+    return width > INT_MAX ? INT_MAX : (int)width;
 }
 
 void snesrecomp_presenter_destroy(SnesRecompPresenter *presenter) {
@@ -184,6 +212,25 @@ SnesRecompPresentBackend snesrecomp_presenter_backend(
 const char *snesrecomp_presenter_backend_name(
     const SnesRecompPresenter *presenter) {
     return presenter ? presenter->backend_name : "unavailable";
+}
+
+SnesRecompVSyncState snesrecomp_presenter_vsync_state(
+    const SnesRecompPresenter *presenter) {
+    return presenter ? presenter->vsync_state : SNESRECOMP_VSYNC_UNKNOWN;
+}
+
+const char *snesrecomp_vsync_state_name(SnesRecompVSyncState state) {
+    switch (state) {
+    case SNESRECOMP_VSYNC_DISABLED:
+        return "disabled";
+    case SNESRECOMP_VSYNC_ENABLED:
+        return "enabled";
+    case SNESRECOMP_VSYNC_UNSUPPORTED:
+        return "unsupported";
+    case SNESRECOMP_VSYNC_UNKNOWN:
+    default:
+        return "unknown";
+    }
 }
 
 const char *snesrecomp_presenter_last_error(

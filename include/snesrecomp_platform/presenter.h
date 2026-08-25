@@ -31,6 +31,13 @@ typedef enum SnesRecompPresentCapability {
     SNESRECOMP_PRESENT_CAP_3D = 1u << 4
 } SnesRecompPresentCapability;
 
+typedef enum SnesRecompVSyncState {
+    SNESRECOMP_VSYNC_UNKNOWN = 0,
+    SNESRECOMP_VSYNC_DISABLED,
+    SNESRECOMP_VSYNC_ENABLED,
+    SNESRECOMP_VSYNC_UNSUPPORTED
+} SnesRecompVSyncState;
+
 /*
  * Optional bridge for shader-preset implementations. The presenter owns the
  * source texture and GL context; the injected renderer owns only its opaque
@@ -62,6 +69,9 @@ typedef struct SnesRecompPresentConfig {
     int frame_height;
     int window_scale;
     bool vsync;
+    /* Horizontal pixel aspect. Non-positive values select square pixels. */
+    int pixel_aspect_numerator;
+    int pixel_aspect_denominator;
     bool preserve_aspect;
     bool linear_filtering;
     bool fullscreen;
@@ -114,6 +124,11 @@ SnesRecompPresentBackend snesrecomp_presenter_backend(
 
 const char *snesrecomp_presenter_backend_name(
     const SnesRecompPresenter *presenter);
+
+SnesRecompVSyncState snesrecomp_presenter_vsync_state(
+    const SnesRecompPresenter *presenter);
+
+const char *snesrecomp_vsync_state_name(SnesRecompVSyncState state);
 
 const char *snesrecomp_presenter_last_error(
     const SnesRecompPresenter *presenter);

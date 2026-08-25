@@ -322,13 +322,15 @@ static bool opengl_present(
     int viewport_width = drawable_width;
     int viewport_height = drawable_height;
     if (context->preserve_aspect) {
-        if (viewport_width * frame->height <
-            viewport_height * frame->width) {
+        const int display_width =
+            snesrecomp_presenter_display_width(presenter, frame->width);
+        if ((int64_t)viewport_width * frame->height <
+            (int64_t)viewport_height * display_width) {
             viewport_height =
-                viewport_width * frame->height / frame->width;
+                viewport_width * frame->height / display_width;
         } else {
             viewport_width =
-                viewport_height * frame->width / frame->height;
+                viewport_height * display_width / frame->height;
         }
     }
     const int viewport_x = (drawable_width - viewport_width) / 2;
@@ -393,7 +395,8 @@ static bool opengl_set_window_scale(
     }
     if (!SDL_SetWindowSize(
             context->window,
-            presenter->frame_width * scale,
+            snesrecomp_presenter_display_width(
+                presenter, presenter->frame_width) * scale,
             presenter->frame_height * scale)) {
         return set_sdl_error(presenter, "SDL_SetWindowSize");
     }
@@ -488,7 +491,8 @@ bool snesrecomp_presenter_opengl_create(
 
     context->window = SDL_CreateWindow(
         config->window_title,
-        config->frame_width * config->window_scale,
+        snesrecomp_presenter_display_width(
+            presenter, config->frame_width) * config->window_scale,
         config->frame_height * config->window_scale,
         SDL_WINDOW_OPENGL |
             SDL_WINDOW_RESIZABLE |
@@ -522,6 +526,13 @@ bool snesrecomp_presenter_opengl_create(
             "[snesrecomp-platform] could not set OpenGL swap interval: %s\n",
             SDL_GetError());
     }
+    int swap_interval = 0;
+    presenter->vsync_state =
+        SDL_GL_GetSwapInterval(&swap_interval)
+            ? (swap_interval != 0
+                ? SNESRECOMP_VSYNC_ENABLED
+                : SNESRECOMP_VSYNC_DISABLED)
+            : SNESRECOMP_VSYNC_UNKNOWN;
 
     glGenTextures(1, &context->texture);
     if (!context->texture) {

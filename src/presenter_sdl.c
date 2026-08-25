@@ -77,7 +77,7 @@ static bool create_texture(
     if (context->preserve_aspect &&
         !SDL_SetRenderLogicalPresentation(
             context->renderer,
-            width,
+            snesrecomp_presenter_display_width(presenter, width),
             height,
             SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
         SDL_DestroyTexture(texture);
@@ -174,7 +174,8 @@ static bool sdl_set_window_scale(
     }
     if (!SDL_SetWindowSize(
             context->window,
-            presenter->frame_width * scale,
+            snesrecomp_presenter_display_width(
+                presenter, presenter->frame_width) * scale,
             presenter->frame_height * scale)) {
         return set_sdl_error(presenter, "SDL_SetWindowSize");
     }
@@ -239,7 +240,8 @@ bool snesrecomp_presenter_sdl_create(
 
     context->window = SDL_CreateWindow(
         config->window_title,
-        config->frame_width * config->window_scale,
+        snesrecomp_presenter_display_width(
+            presenter, config->frame_width) * config->window_scale,
         config->frame_height * config->window_scale,
         SDL_WINDOW_RESIZABLE);
     if (!context->window)
@@ -253,9 +255,24 @@ bool snesrecomp_presenter_sdl_create(
     if (!context->renderer)
         return set_sdl_error(presenter, "SDL_CreateRenderer");
 
-    if (!software)
-        (void)SDL_SetRenderVSync(
-            context->renderer, config->vsync ? 1 : 0);
+    presenter->vsync_state = SNESRECOMP_VSYNC_UNSUPPORTED;
+    if (!software) {
+        if (!SDL_SetRenderVSync(
+                context->renderer, config->vsync ? 1 : 0)) {
+            fprintf(
+                stderr,
+                "[snesrecomp-platform] could not set SDL VSync: %s\n",
+                SDL_GetError());
+        }
+        int active = 0;
+        if (SDL_GetRenderVSync(context->renderer, &active)) {
+            presenter->vsync_state = active
+                ? SNESRECOMP_VSYNC_ENABLED
+                : SNESRECOMP_VSYNC_DISABLED;
+        } else {
+            presenter->vsync_state = SNESRECOMP_VSYNC_UNKNOWN;
+        }
+    }
 
     if (!create_texture(
             presenter,
