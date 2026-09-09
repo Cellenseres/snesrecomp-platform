@@ -5,6 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "snesrecomp_platform/snes_ppu_mode7.h"
+#include "snesrecomp_platform/snes_ppu_obj.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,7 +19,8 @@ typedef enum SnesRecompPresentBackend {
     SNESRECOMP_PRESENT_BACKEND_SDL,
     SNESRECOMP_PRESENT_BACKEND_SDL_SOFTWARE,
     SNESRECOMP_PRESENT_BACKEND_OPENGL,
-    SNESRECOMP_PRESENT_BACKEND_SDL_GPU
+    SNESRECOMP_PRESENT_BACKEND_SDL_GPU,
+    SNESRECOMP_PRESENT_BACKEND_NATIVE
 } SnesRecompPresentBackend;
 
 typedef enum SnesRecompPixelFormat {
@@ -28,7 +32,8 @@ typedef enum SnesRecompPresentCapability {
     SNESRECOMP_PRESENT_CAP_SHADER = 1u << 1,
     SNESRECOMP_PRESENT_CAP_MULTIPASS = 1u << 2,
     SNESRECOMP_PRESENT_CAP_OVERLAYS = 1u << 3,
-    SNESRECOMP_PRESENT_CAP_3D = 1u << 4
+    SNESRECOMP_PRESENT_CAP_3D = 1u << 4,
+    SNESRECOMP_PRESENT_CAP_HD_MODE7 = 1u << 5
 } SnesRecompPresentCapability;
 
 typedef enum SnesRecompVSyncState {
@@ -61,6 +66,14 @@ typedef struct SnesRecompShaderPresetInterface {
         int viewport_height);
 } SnesRecompShaderPresetInterface;
 
+/* These types cross static-library boundaries. GCC's arm-*-eabi default can
+ * otherwise give the adapter and its caller different structure layouts. */
+_Static_assert(sizeof(SnesRecompPresentBackend) == sizeof(int) &&
+                   sizeof(SnesRecompPixelFormat) == sizeof(int) &&
+                   sizeof(SnesRecompVSyncState) == sizeof(int),
+               "snesrecomp_platform requires int-sized enums; build this "
+               "target with -fno-short-enums.");
+
 typedef struct SnesRecompPresentConfig {
     const char *window_title;
     SnesRecompPresentBackend backend;
@@ -87,6 +100,17 @@ typedef struct SnesRecompVideoFrame {
     int pitch;
 } SnesRecompVideoFrame;
 
+/* Optional semantic Mode 7 presentation. This is deliberately separate from
+ * SnesRecompVideoFrame: the backend reconstructs the plane from authoritative
+ * SNES data rather than sharpening an already-rasterised image. */
+typedef struct SnesRecompMode7HdFrame {
+    const SnesPpuFrameCapture *capture;
+    const SnesRecompMode7Line *lines;
+    unsigned line_count;
+    const SnesRecompObjFrame *obj;
+    unsigned scale;
+} SnesRecompMode7HdFrame;
+
 bool snesrecomp_presenter_create(
     const SnesRecompPresentConfig *config,
     SnesRecompPresenter **out_presenter,
@@ -98,6 +122,12 @@ void snesrecomp_presenter_destroy(SnesRecompPresenter *presenter);
 bool snesrecomp_presenter_present(
     SnesRecompPresenter *presenter,
     const SnesRecompVideoFrame *frame);
+
+/* Returns false without presenting when this backend cannot render the
+ * requested semantic frame. The caller can then submit its authentic frame. */
+bool snesrecomp_presenter_present_mode7_hd(
+    SnesRecompPresenter *presenter,
+    const SnesRecompMode7HdFrame *frame);
 
 bool snesrecomp_presenter_set_fullscreen(
     SnesRecompPresenter *presenter,

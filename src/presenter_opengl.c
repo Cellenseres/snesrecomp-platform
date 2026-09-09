@@ -1,8 +1,9 @@
-#include "presenter_internal.h"
+#include "snesrecomp_platform/presenter_backend.h"
 
 #include "gl_core_3_1.h"
 #include <SDL3/SDL.h>
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,22 @@ typedef struct OpenGlPresenterContext {
     bool linear_filtering;
     const SnesRecompShaderPresetInterface *preset_interface;
     void *preset;
+
+    /* Lazily created so the authentic path allocates and executes exactly the
+     * same resources and calls as before when HD Mode 7 is off. */
+    GLuint mode7_program;
+    GLuint mode7_fbo;
+    GLuint mode7_target;
+    GLuint mode7_map_texture;
+    GLuint mode7_char_texture;
+    GLuint mode7_palette_texture;
+    GLuint mode7_line_texture;
+    GLuint mode7_flags_texture;
+    GLuint mode7_obj_texture;
+    int mode7_target_width;
+    int mode7_target_height;
+    uint8_t *mode7_obj_pixels;
+    size_t mode7_obj_capacity;
 } OpenGlPresenterContext;
 
 static bool set_sdl_error(
@@ -153,6 +170,145 @@ static bool create_program(SnesRecompPresenter *presenter) {
     return true;
 }
 
+static bool link_mode7_program(SnesRecompPresenter *presenter) {
+    static const char vertex_source[] =
+        "#version 330 core\n"
+        "layout(location = 0) in vec2 position;\n"
+        "void main(void) { gl_Position = vec4(position, 0.0, 1.0); }\n";
+    static const char fragment_source[] =
+        "#version 330 core\n"
+        "out vec4 color;\n"
+        "uniform sampler2D map_texture;\n"
+        "uniform sampler2D char_texture;\n"
+        "uniform sampler2D palette_texture;\n"
+        "uniform sampler2D line_texture;\n"
+        "uniform sampler2D flags_texture;\n"
+        "uniform sampler2D obj_texture;\n"
+        "uniform float hd_scale;\n"
+        "uniform float canvas_extra;\n"
+        "uniform float native_height;\n"
+        "float byte_value(float v) { return floor(v * 255.0 + 0.5); }\n"
+        "vec3 palette_rgb(float index, float brightness) {\n"
+        "  vec3 c5 = floor(texelFetch(palette_texture,\n"
+        "      ivec2(int(index), 0), 0).rgb * 255.0 + 0.5);\n"
+        "  vec3 c8 = c5 * 8.0 + floor(c5 * 0.25);\n"
+        "  return floor(c8 * brightness / 15.0) / 255.0;\n"
+        "}\n"
+        "void main(void) {\n"
+        "  int line = int(floor(gl_FragCoord.y / hd_scale));\n"
+        "  line = clamp(line, 0, int(native_height) - 1);\n"
+        "  vec4 flags = texelFetch(flags_texture, ivec2(0, line), 0);\n"
+        "  float brightness = byte_value(flags.r);\n"
+        "  float margin_left = byte_value(flags.g);\n"
+        "  int enables = int(byte_value(flags.b));\n"
+        "  float margin_right = byte_value(flags.a);\n"
+        "  if (brightness < 0.5) { color = vec4(0,0,0,1); return; }\n"
+        "  float local_hd_x = gl_FragCoord.x - canvas_extra * hd_scale;\n"
+        "  bool in_bg = local_hd_x >= -margin_left * hd_scale &&\n"
+        "               local_hd_x < (256.0 + margin_right) * hd_scale;\n"
+        "  float bg_index = 0.0;\n"
+        "  if (in_bg && (enables & 1) != 0) {\n"
+        "    vec4 affine = texelFetch(line_texture, ivec2(0, line), 0);\n"
+        "    float native_x = (local_hd_x + 0.5) / hd_scale - 0.5;\n"
+        "    vec2 fixed_coord = floor(affine.xy + affine.zw * native_x);\n"
+        "    fixed_coord -= floor(fixed_coord / 262144.0) * 262144.0;\n"
+        "    ivec2 pixel = ivec2(floor(fixed_coord / 256.0));\n"
+        "    ivec2 tile_xy = pixel / 8;\n"
+        "    int tile = int(byte_value(texelFetch(map_texture, tile_xy, 0).r));\n"
+        "    ivec2 in_tile = pixel - tile_xy * 8;\n"
+        "    int address = tile * 64 + in_tile.y * 8 + in_tile.x;\n"
+        "    bg_index = byte_value(texelFetch(char_texture,\n"
+        "        ivec2(address & 127, address >> 7), 0).r);\n"
+        "  }\n"
+        "  int native_xi = int(floor(gl_FragCoord.x / hd_scale));\n"
+        "  vec2 obj = texelFetch(obj_texture, ivec2(native_xi, line), 0).rg;\n"
+        "  float obj_index = byte_value(obj.r);\n"
+        "  float obj_priority = byte_value(obj.g);\n"
+        "  bool obj_wins = (enables & 16) != 0 && obj_index > 0.5 &&\n"
+        "                  (bg_index < 0.5 || obj_priority > 0.5);\n"
+        "  float palette_index = obj_wins ? obj_index : bg_index;\n"
+        "  color = vec4(palette_rgb(palette_index, brightness), 1.0);\n"
+        "}\n";
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    GLuint vs = 0, fs = 0;
+    GLint linked = GL_FALSE;
+
+    if (!compile_shader(presenter, GL_VERTEX_SHADER, vertex_source, &vs) ||
+        !compile_shader(presenter, GL_FRAGMENT_SHADER, fragment_source, &fs)) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return false;
+    }
+    context->mode7_program = glCreateProgram();
+    glAttachShader(context->mode7_program, vs);
+    glAttachShader(context->mode7_program, fs);
+    glLinkProgram(context->mode7_program);
+    glGetProgramiv(context->mode7_program, GL_LINK_STATUS, &linked);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (linked != GL_TRUE) {
+        char log[512];
+        GLsizei length = 0;
+        glGetProgramInfoLog(context->mode7_program, (GLsizei)sizeof(log),
+                            &length, log);
+        log[sizeof(log) - 1] = '\0';
+        snesrecomp_presenter_set_error(
+            presenter, "HD Mode 7 program link failed: %s",
+            length > 0 ? log : "no driver log");
+        return false;
+    }
+
+    glUseProgram(context->mode7_program);
+    static const char *const samplers[] = {
+        "map_texture", "char_texture", "palette_texture", "line_texture",
+        "flags_texture", "obj_texture",
+    };
+    for (unsigned i = 0; i < sizeof samplers / sizeof samplers[0]; i++) {
+        const GLint location =
+            glGetUniformLocation(context->mode7_program, samplers[i]);
+        if (location >= 0)
+            glUniform1i(location, (GLint)i);
+    }
+    return true;
+}
+
+static void mode7_texture_parameters(void) {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+static bool create_mode7_resources(SnesRecompPresenter *presenter) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    GLuint textures[6] = {0};
+
+    if (context->mode7_program)
+        return true;
+    if (!link_mode7_program(presenter))
+        return false;
+    glGenFramebuffers(1, &context->mode7_fbo);
+    glGenTextures(1, &context->mode7_target);
+    glGenTextures(6, textures);
+    context->mode7_map_texture = textures[0];
+    context->mode7_char_texture = textures[1];
+    context->mode7_palette_texture = textures[2];
+    context->mode7_line_texture = textures[3];
+    context->mode7_flags_texture = textures[4];
+    context->mode7_obj_texture = textures[5];
+    if (!context->mode7_fbo || !context->mode7_target ||
+        !context->mode7_map_texture || !context->mode7_char_texture ||
+        !context->mode7_palette_texture || !context->mode7_line_texture ||
+        !context->mode7_flags_texture || !context->mode7_obj_texture) {
+        snesrecomp_presenter_set_error(
+            presenter, "HD Mode 7 OpenGL resource allocation failed");
+        return false;
+    }
+    return true;
+}
+
 static bool create_geometry(SnesRecompPresenter *presenter) {
     static const GLfloat vertices[] = {
         -1.0f,  1.0f, 0.0f, 0.0f,
@@ -246,6 +402,25 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
         context->preset_interface->destroy) {
         context->preset_interface->destroy(context->preset);
     }
+    free(context->mode7_obj_pixels);
+    if (context->mode7_program)
+        glDeleteProgram(context->mode7_program);
+    if (context->mode7_fbo)
+        glDeleteFramebuffers(1, &context->mode7_fbo);
+    {
+        const GLuint mode7_textures[] = {
+            context->mode7_target,
+            context->mode7_map_texture,
+            context->mode7_char_texture,
+            context->mode7_palette_texture,
+            context->mode7_line_texture,
+            context->mode7_flags_texture,
+            context->mode7_obj_texture,
+        };
+        glDeleteTextures(
+            (GLsizei)(sizeof mode7_textures / sizeof mode7_textures[0]),
+            mode7_textures);
+    }
     if (context->program)
         glDeleteProgram(context->program);
     if (context->vertex_buffer)
@@ -260,6 +435,67 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
         SDL_DestroyWindow(context->window);
     free(context);
     presenter->context = NULL;
+}
+
+static bool opengl_present_texture(
+    SnesRecompPresenter *presenter, GLuint texture,
+    int source_width, int source_height,
+    int logical_width, int logical_height) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    int drawable_width = 0, drawable_height = 0;
+    int viewport_width, viewport_height, viewport_x, viewport_y;
+
+    if (!SDL_GetWindowSizeInPixels(
+            context->window, &drawable_width, &drawable_height)) {
+        return set_sdl_error(presenter, "SDL_GetWindowSizeInPixels");
+    }
+    if (drawable_width <= 0 || drawable_height <= 0)
+        return true;
+
+    viewport_width = drawable_width;
+    viewport_height = drawable_height;
+    if (context->preserve_aspect) {
+        const int display_width =
+            snesrecomp_presenter_display_width(presenter, logical_width);
+        if ((int64_t)viewport_width * logical_height <
+            (int64_t)viewport_height * display_width) {
+            viewport_height = viewport_width * logical_height / display_width;
+        } else {
+            viewport_width = viewport_height * display_width / logical_height;
+        }
+    }
+    viewport_x = (drawable_width - viewport_width) / 2;
+    viewport_y = (drawable_height - viewport_height) / 2;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (context->preset) {
+        context->preset_interface->render(
+            context->preset, texture, source_width, source_height,
+            viewport_x, viewport_y, viewport_width, viewport_height);
+    } else {
+        glViewport(viewport_x, viewport_y, viewport_width, viewport_height);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glUseProgram(context->program);
+        glBindVertexArray(context->vertex_array);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    {
+        const GLenum gl_error = glGetError();
+        if (gl_error != GL_NO_ERROR) {
+            snesrecomp_presenter_set_error(
+                presenter, "OpenGL present failed with error 0x%04x",
+                (unsigned)gl_error);
+            return false;
+        }
+    }
+    if (!SDL_GL_SwapWindow(context->window))
+        return set_sdl_error(presenter, "SDL_GL_SwapWindow");
+    return true;
 }
 
 static bool opengl_present(
@@ -309,68 +545,233 @@ static bool opengl_present(
             frame->pixels);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     }
+    return opengl_present_texture(
+        presenter, context->texture, frame->width, frame->height,
+        frame->width, frame->height);
+}
 
-    int drawable_width = 0;
-    int drawable_height = 0;
-    if (!SDL_GetWindowSizeInPixels(
-            context->window, &drawable_width, &drawable_height)) {
-        return set_sdl_error(presenter, "SDL_GetWindowSizeInPixels");
-    }
-    if (drawable_width <= 0 || drawable_height <= 0)
-        return true;
+static uint8_t mode7_obj_texel(const uint16_t *vram,
+                               const SnesRecompObjSliver *sliver,
+                               unsigned x) {
+    const unsigned word = (unsigned)sliver->tile * 16u + sliver->row;
+    const uint16_t lo = vram[word & 0x7fffu];
+    const uint16_t hi = vram[(word + 8u) & 0x7fffu];
+    const unsigned bit = sliver->flip_h ? x : 7u - x;
+    return (uint8_t)(((lo >> bit) & 1u) |
+                     (((lo >> (bit + 8u)) & 1u) << 1u) |
+                     (((hi >> bit) & 1u) << 2u) |
+                     (((hi >> (bit + 8u)) & 1u) << 3u));
+}
 
-    int viewport_width = drawable_width;
-    int viewport_height = drawable_height;
-    if (context->preserve_aspect) {
-        const int display_width =
-            snesrecomp_presenter_display_width(presenter, frame->width);
-        if ((int64_t)viewport_width * frame->height <
-            (int64_t)viewport_height * display_width) {
-            viewport_height =
-                viewport_width * frame->height / display_width;
-        } else {
-            viewport_width =
-                viewport_height * display_width / frame->height;
+static bool build_mode7_obj_plane(
+    SnesRecompPresenter *presenter, const SnesRecompMode7HdFrame *frame) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    const SnesPpuFrameCapture *cap = frame->capture;
+    const size_t bytes =
+        (size_t)cap->canvas_width * cap->visible_height * 2u;
+
+    if (context->mode7_obj_capacity < bytes) {
+        uint8_t *grown = (uint8_t *)realloc(context->mode7_obj_pixels, bytes);
+        if (!grown) {
+            snesrecomp_presenter_set_error(
+                presenter, "out of memory for HD Mode 7 OBJ plane");
+            return false;
         }
+        context->mode7_obj_pixels = grown;
+        context->mode7_obj_capacity = bytes;
     }
-    const int viewport_x = (drawable_width - viewport_width) / 2;
-    const int viewport_y = (drawable_height - viewport_height) / 2;
-
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    if (context->preset) {
-        context->preset_interface->render(
-            context->preset,
-            context->texture,
-            frame->width,
-            frame->height,
-            viewport_x,
-            viewport_y,
-            viewport_width,
-            viewport_height);
-    } else {
-        glViewport(
-            viewport_x,
-            viewport_y,
-            viewport_width,
-            viewport_height);
-        glUseProgram(context->program);
-        glBindVertexArray(context->vertex_array);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    }
-
-    const GLenum gl_error = glGetError();
-    if (gl_error != GL_NO_ERROR) {
+    memset(context->mode7_obj_pixels, 0, bytes);
+    if (!frame->obj)
+        return true;
+    if (!frame->obj->slivers || frame->obj->count > frame->obj->capacity) {
         snesrecomp_presenter_set_error(
-            presenter,
-            "OpenGL present failed with error 0x%04x",
-            (unsigned)gl_error);
+            presenter, "invalid HD Mode 7 OBJ frame");
         return false;
     }
 
-    if (!SDL_GL_SwapWindow(context->window))
-        return set_sdl_error(presenter, "SDL_GL_SwapWindow");
+    /* The evaluator emits back-to-front slivers. Plain overwrite here first
+     * resolves OAM order into one native OBJ plane; priority is consulted only
+     * afterwards by the Mode 7 compositor. */
+    for (unsigned i = 0; i < frame->obj->count; i++) {
+        const SnesRecompObjSliver *s = &frame->obj->slivers[i];
+        if (s->line >= cap->visible_height || s->priority > 3u) {
+            snesrecomp_presenter_set_error(
+                presenter, "invalid HD Mode 7 OBJ sliver");
+            return false;
+        }
+        for (unsigned px = 0; px < 8u; px++) {
+            const int canvas_x =
+                (int)cap->canvas_extra + (int)s->screen_x + (int)px;
+            uint8_t index;
+            uint8_t *dst;
+            if (canvas_x < 0 || canvas_x >= (int)cap->canvas_width)
+                continue;
+            index = mode7_obj_texel(cap->vram, s, px);
+            if (!index)
+                continue;
+            dst = context->mode7_obj_pixels +
+                ((size_t)s->line * cap->canvas_width +
+                 (unsigned)canvas_x) * 2u;
+            dst[0] = (uint8_t)(s->palette_base + index);
+            dst[1] = s->priority;
+        }
+    }
     return true;
+}
+
+static void upload_mode7_texture(GLuint texture, GLint internal_format,
+                                 GLenum format, GLenum type,
+                                 int width, int height, const void *pixels) {
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0,
+                 format, type, pixels);
+    mode7_texture_parameters();
+}
+
+static bool allocate_mode7_target(SnesRecompPresenter *presenter,
+                                  int width, int height) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    if (context->mode7_target_width == width &&
+        context->mode7_target_height == height)
+        return true;
+
+    glBindTexture(GL_TEXTURE_2D, context->mode7_target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    mode7_texture_parameters();
+    {
+        const GLint filter =
+            context->linear_filtering ? GL_LINEAR : GL_NEAREST;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, context->mode7_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, context->mode7_target, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        snesrecomp_presenter_set_error(
+            presenter, "HD Mode 7 framebuffer is incomplete");
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        return false;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    context->mode7_target_width = width;
+    context->mode7_target_height = height;
+    return true;
+}
+
+static bool opengl_present_mode7_hd(
+    SnesRecompPresenter *presenter,
+    const SnesRecompMode7HdFrame *frame) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    uint8_t map_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
+    uint8_t char_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
+    uint8_t palette[SNES_PPU_CGRAM_ENTRIES * 4u];
+    float affine[SNES_PPU_MAX_BANDS * 4u];
+    uint8_t flags[SNES_PPU_MAX_BANDS * 4u];
+    const SnesPpuFrameCapture *cap;
+    int target_width, target_height;
+    bool wants_obj = false;
+
+    if (!frame || !(cap = frame->capture) || frame->scale != 2u ||
+        !frame->lines || frame->line_count < cap->visible_height ||
+        snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
+        cap->visible_height > SNES_PPU_MAX_BANDS ||
+        cap->canvas_width > INT_MAX / 2 ||
+        cap->visible_height > INT_MAX / 2) {
+        snesrecomp_presenter_set_error(
+            presenter, "unsupported HD Mode 7 frame");
+        return false;
+    }
+    for (unsigned bi = 0; bi < cap->band_count; bi++)
+        if (!cap->bands[bi].forced_blank &&
+            (cap->bands[bi].main_enable & 0x10u))
+            wants_obj = true;
+    if (wants_obj && !frame->obj) {
+        snesrecomp_presenter_set_error(
+            presenter, "HD Mode 7 frame is missing qualified OBJ state");
+        return false;
+    }
+    if (!make_current(presenter) || !create_mode7_resources(presenter) ||
+        !build_mode7_obj_plane(presenter, frame))
+        return false;
+
+    target_width = (int)cap->canvas_width * 2;
+    target_height = (int)cap->visible_height * 2;
+    if (!allocate_mode7_target(presenter, target_width, target_height) ||
+        !snesrecomp_ppu_mode7_unpack_vram(cap->vram, map_tex, char_tex))
+        return false;
+
+    memset(flags, 0, sizeof flags);
+    for (unsigned y = 0; y < cap->visible_height; y++) {
+        affine[y * 4u + 0u] = (float)frame->lines[y].start_x;
+        affine[y * 4u + 1u] = (float)frame->lines[y].start_y;
+        affine[y * 4u + 2u] = (float)frame->lines[y].step_x;
+        affine[y * 4u + 3u] = (float)frame->lines[y].step_y;
+    }
+    for (unsigned bi = 0; bi < cap->band_count; bi++) {
+        const SnesPpuRasterBand *band = &cap->bands[bi];
+        for (unsigned y = band->y_begin; y < band->y_end; y++) {
+            flags[y * 4u + 0u] =
+                band->forced_blank ? 0u : band->brightness;
+            flags[y * 4u + 1u] = band->bg[0].margin_left;
+            flags[y * 4u + 2u] = band->main_enable;
+            flags[y * 4u + 3u] = band->bg[0].margin_right;
+        }
+    }
+    for (unsigned i = 0; i < SNES_PPU_CGRAM_ENTRIES; i++) {
+        const uint16_t c = cap->cgram[i];
+        palette[i * 4u + 0u] = (uint8_t)(c & 31u);
+        palette[i * 4u + 1u] = (uint8_t)((c >> 5u) & 31u);
+        palette[i * 4u + 2u] = (uint8_t)((c >> 10u) & 31u);
+        palette[i * 4u + 3u] = 255u;
+    }
+
+    glActiveTexture(GL_TEXTURE0);
+    upload_mode7_texture(context->mode7_map_texture, GL_R8, GL_RED,
+                         GL_UNSIGNED_BYTE, 128, 128, map_tex);
+    glActiveTexture(GL_TEXTURE1);
+    upload_mode7_texture(context->mode7_char_texture, GL_R8, GL_RED,
+                         GL_UNSIGNED_BYTE, 128, 128, char_tex);
+    glActiveTexture(GL_TEXTURE2);
+    upload_mode7_texture(context->mode7_palette_texture, GL_RGBA8, GL_RGBA,
+                         GL_UNSIGNED_BYTE, 256, 1, palette);
+    glActiveTexture(GL_TEXTURE3);
+    upload_mode7_texture(context->mode7_line_texture, GL_RGBA32F, GL_RGBA,
+                         GL_FLOAT, 1, (int)cap->visible_height, affine);
+    glActiveTexture(GL_TEXTURE4);
+    upload_mode7_texture(context->mode7_flags_texture, GL_RGBA8, GL_RGBA,
+                         GL_UNSIGNED_BYTE, 1, (int)cap->visible_height, flags);
+    glActiveTexture(GL_TEXTURE5);
+    upload_mode7_texture(
+        context->mode7_obj_texture, GL_RG8, GL_RG, GL_UNSIGNED_BYTE,
+        (int)cap->canvas_width, (int)cap->visible_height,
+        context->mode7_obj_pixels);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, context->mode7_fbo);
+    glViewport(0, 0, target_width, target_height);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glUseProgram(context->mode7_program);
+    glUniform1f(glGetUniformLocation(context->mode7_program, "hd_scale"),
+                2.0f);
+    glUniform1f(glGetUniformLocation(context->mode7_program, "canvas_extra"),
+                (float)cap->canvas_extra);
+    glUniform1f(glGetUniformLocation(context->mode7_program, "native_height"),
+                (float)cap->visible_height);
+    glBindVertexArray(context->vertex_array);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    return opengl_present_texture(
+        presenter, context->mode7_target, target_width, target_height,
+        (int)cap->canvas_width, (int)cap->visible_height);
 }
 
 static bool opengl_set_fullscreen(
@@ -441,6 +842,7 @@ static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_set_window_scale,
     opengl_set_window_title,
     opengl_get_drawable_size,
+    opengl_present_mode7_hd,
 };
 
 static bool set_gl_attribute(
@@ -584,6 +986,9 @@ bool snesrecomp_presenter_opengl_create(
 
     presenter->backend = SNESRECOMP_PRESENT_BACKEND_OPENGL;
     presenter->capabilities = SNESRECOMP_PRESENT_CAP_BASIC;
+    presenter->capabilities |=
+        SNESRECOMP_PRESENT_CAP_3D |
+        SNESRECOMP_PRESENT_CAP_HD_MODE7;
     if (config->shader_preset_interface) {
         presenter->capabilities |=
             SNESRECOMP_PRESENT_CAP_SHADER |

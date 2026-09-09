@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "presenter_internal.h"
+#include "snesrecomp_platform/presenter_backend.h"
 
 static void write_error(
     char *error,
@@ -116,6 +116,14 @@ bool snesrecomp_presenter_create(
         snesrecomp_presenter_set_error(
             presenter, "SDL GPU presenter is not compiled yet");
         break;
+    case SNESRECOMP_PRESENT_BACKEND_NATIVE:
+#if SNESRECOMP_PLATFORM_HAS_NATIVE_PRESENTER
+        created = snesrecomp_presenter_native_create(presenter, config);
+#else
+        snesrecomp_presenter_set_error(
+            presenter, "native presenter is not compiled in this build");
+#endif
+        break;
     default:
         snesrecomp_presenter_set_error(
             presenter, "unknown presentation backend");
@@ -164,6 +172,16 @@ bool snesrecomp_presenter_present(
     if (!presenter || !presenter->ops || !presenter->ops->present)
         return false;
     return presenter->ops->present(presenter, frame);
+}
+
+bool snesrecomp_presenter_present_mode7_hd(
+    SnesRecompPresenter *presenter,
+    const SnesRecompMode7HdFrame *frame) {
+    if (!presenter || !presenter->ops ||
+        !presenter->ops->present_mode7_hd ||
+        !(presenter->capabilities & SNESRECOMP_PRESENT_CAP_HD_MODE7))
+        return false;
+    return presenter->ops->present_mode7_hd(presenter, frame);
 }
 
 bool snesrecomp_presenter_set_fullscreen(
