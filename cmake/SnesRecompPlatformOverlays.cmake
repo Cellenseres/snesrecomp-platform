@@ -46,7 +46,7 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
         const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;
 
         /* Platform-owned policy; bridge-owned unwind mechanics. */
-        if (snesrecomp_platform_nested_lle_deadline_due(
+        if (snesrecomp_nested_lle_deadline_due(
                 yield_pc != 0, stop_on_rti, s_lle_sched_depth,
                 s_interp_bounce_owner_depth, s_lle_master_deadline,
                 cpu->master_cycles)) {

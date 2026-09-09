@@ -12,7 +12,7 @@ typedef struct TaskWorker {
     bool pending;            /* owned by the submitting thread alone */
 } TaskWorker;
 
-static TaskWorker s_workers[SNESRECOMP_PLATFORM_TASK_WORKERS];
+static TaskWorker s_workers[SNESRECOMP_TASK_WORKERS];
 static SDL_AtomicInt s_running;
 static unsigned s_worker_count;
 static bool s_enabled;
@@ -41,11 +41,11 @@ static uint64_t now_us(void) {
            (counter % s_freq) * UINT64_C(1000000) / s_freq;
 }
 
-uint64_t snesrecomp_platform_now_us(void) {
+uint64_t snesrecomp_now_us(void) {
     return now_us();
 }
 
-void snesrecomp_platform_task_set_thread_hook(void (*hook)(unsigned index)) {
+void snesrecomp_task_set_thread_hook(void (*hook)(unsigned index)) {
     s_thread_hook = hook;
 }
 
@@ -67,9 +67,9 @@ static int SDLCALL task_worker(void *param) {
     return 0;
 }
 
-bool snesrecomp_platform_task_enable(bool enabled) {
+bool snesrecomp_task_enable(bool enabled) {
     if (!enabled) {
-        snesrecomp_platform_task_shutdown();
+        snesrecomp_task_shutdown();
         return true;
     }
     if (s_enabled)
@@ -77,7 +77,7 @@ bool snesrecomp_platform_task_enable(bool enabled) {
 
     SDL_SetAtomicInt(&s_running, 1);
     s_worker_count = 0;
-    for (unsigned i = 0; i < SNESRECOMP_PLATFORM_TASK_WORKERS; i++) {
+    for (unsigned i = 0; i < SNESRECOMP_TASK_WORKERS; i++) {
         TaskWorker *w = &s_workers[i];
         w->request = SDL_CreateSemaphore(0);
         w->done = SDL_CreateSemaphore(0);
@@ -97,7 +97,7 @@ bool snesrecomp_platform_task_enable(bool enabled) {
      * state rather than leaving half-built workers behind. */
     if (s_worker_count == 0) {
         SDL_SetAtomicInt(&s_running, 0);
-        snesrecomp_platform_task_shutdown();
+        snesrecomp_task_shutdown();
         return false;
     }
 
@@ -105,11 +105,11 @@ bool snesrecomp_platform_task_enable(bool enabled) {
     return true;
 }
 
-unsigned snesrecomp_platform_task_worker_count(void) {
+unsigned snesrecomp_task_worker_count(void) {
     return s_enabled ? s_worker_count : 0u;
 }
 
-bool snesrecomp_platform_task_submit(unsigned slot, void (*fn)(void *),
+bool snesrecomp_task_submit(unsigned slot, void (*fn)(void *),
                                      void *arg) {
     TaskWorker *w;
     if (!s_enabled || !fn || slot >= s_worker_count)
@@ -124,8 +124,8 @@ bool snesrecomp_platform_task_submit(unsigned slot, void (*fn)(void *),
     return true;
 }
 
-void snesrecomp_platform_task_wait(void) {
-    for (unsigned i = 0; i < SNESRECOMP_PLATFORM_TASK_WORKERS; i++) {
+void snesrecomp_task_wait(void) {
+    for (unsigned i = 0; i < SNESRECOMP_TASK_WORKERS; i++) {
         TaskWorker *w = &s_workers[i];
         if (!w->pending)
             continue;
@@ -134,18 +134,18 @@ void snesrecomp_platform_task_wait(void) {
     }
 }
 
-void snesrecomp_platform_task_shutdown(void) {
-    snesrecomp_platform_task_wait();
+void snesrecomp_task_shutdown(void) {
+    snesrecomp_task_wait();
     SDL_SetAtomicInt(&s_running, 0);
 
     /* Every worker has to be woken before any is joined: they all block on
      * their own semaphore, and a thread still waiting would never observe the
      * cleared running flag. */
-    for (unsigned i = 0; i < SNESRECOMP_PLATFORM_TASK_WORKERS; i++)
+    for (unsigned i = 0; i < SNESRECOMP_TASK_WORKERS; i++)
         if (s_workers[i].thread)
             SDL_SignalSemaphore(s_workers[i].request);
 
-    for (unsigned i = 0; i < SNESRECOMP_PLATFORM_TASK_WORKERS; i++) {
+    for (unsigned i = 0; i < SNESRECOMP_TASK_WORKERS; i++) {
         TaskWorker *w = &s_workers[i];
         if (w->thread) {
             SDL_WaitThread(w->thread, NULL);
@@ -167,8 +167,8 @@ void snesrecomp_platform_task_shutdown(void) {
     s_worker_count = 0;
 }
 
-uint64_t snesrecomp_platform_task_busy_us(unsigned slot) {
-    if (slot >= SNESRECOMP_PLATFORM_TASK_WORKERS)
+uint64_t snesrecomp_task_busy_us(unsigned slot) {
+    if (slot >= SNESRECOMP_TASK_WORKERS)
         return 0;
     return s_workers[slot].busy_us;
 }

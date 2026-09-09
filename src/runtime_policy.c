@@ -1,6 +1,6 @@
 #include "snesrecomp_platform/runtime_policy.h"
 
-int snesrecomp_platform_nested_lle_deadline_due(
+int snesrecomp_nested_lle_deadline_due(
     int local_yield_active,
     int stop_on_rti,
     int scheduler_depth,

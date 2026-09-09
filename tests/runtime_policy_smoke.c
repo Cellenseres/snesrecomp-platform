@@ -12,7 +12,7 @@ static int expect_due(
     uint64_t deadline,
     uint64_t current,
     const char *name) {
-    const int actual = snesrecomp_platform_nested_lle_deadline_due(
+    const int actual = snesrecomp_nested_lle_deadline_due(
         local_yield_active, stop_on_rti, scheduler_depth, bounce_owner_depth,
         deadline, current);
     if (!!actual == !!expected)
