@@ -10,6 +10,8 @@ endif()
 
 add_library(snesrecomp_platform_runtime STATIC
     src/runtime_policy.c
+    src/sha1.c
+    src/rom_verify.c
     src/msu_pack.c
 )
 add_library(snesrecomp::runtime ALIAS snesrecomp_platform_runtime)
@@ -27,7 +29,42 @@ set_target_properties(snesrecomp_platform_runtime PROPERTIES
 add_library(snesrecomp_platform STATIC
     src/presenter.c
     src/presenter_sdl.c
+    src/task.c
+    # SNES semantics shared by reference renderers and native GPU backends.
+    # These sources contain no console SDK or game-specific code.
+    src/snes_ppu_capture.c
+    src/snes_ppu_mode7.c
+    src/snes_tiles.c
+    src/snes_bg_upload.c
+    src/snes_bg_strips.c
+    src/snes_ppu_semantics.c
+    src/snes_ppu_semantic_gpu.c
+    src/snes_ppu_obj.c
+    src/snes_ppu_trace.c
 )
+
+# A target adapter may contribute one native presenter implementation.  The
+# portable project consumes a generic source/include/library contract and does
+# not need to know whether the backend is GXM or another console API.
+if(SNESRECOMP_PLATFORM_NATIVE_PRESENTER_SOURCES)
+    target_sources(snesrecomp_platform PRIVATE
+        ${SNESRECOMP_PLATFORM_NATIVE_PRESENTER_SOURCES})
+    if(SNESRECOMP_PLATFORM_NATIVE_PRESENTER_INCLUDE_DIRS)
+        target_include_directories(snesrecomp_platform PRIVATE
+            ${SNESRECOMP_PLATFORM_NATIVE_PRESENTER_INCLUDE_DIRS})
+    endif()
+    if(SNESRECOMP_PLATFORM_NATIVE_PRESENTER_LIBRARIES)
+        target_link_libraries(snesrecomp_platform PRIVATE
+            ${SNESRECOMP_PLATFORM_NATIVE_PRESENTER_LIBRARIES})
+    endif()
+    target_compile_definitions(snesrecomp_platform PUBLIC
+        SNESRECOMP_PLATFORM_HAS_NATIVE_PRESENTER=1
+        SNESRECOMP_PLATFORM_HAS_GPU_BG=1)
+else()
+    target_compile_definitions(snesrecomp_platform PUBLIC
+        SNESRECOMP_PLATFORM_HAS_NATIVE_PRESENTER=0
+        SNESRECOMP_PLATFORM_HAS_GPU_BG=0)
+endif()
 
 add_library(snesrecomp::platform ALIAS snesrecomp_platform)
 
@@ -72,6 +109,13 @@ set_target_properties(snesrecomp_platform PROPERTIES
     C_EXTENSIONS OFF
 )
 
+# GCC defaults to short enums for arm-*-eabi. Public presenter structures carry
+# enums before scalar fields, so every consumer must use the same enum ABI.
+if(SNESRECOMP_PLATFORM_REQUIRE_INT_ENUMS)
+    target_compile_options(snesrecomp_platform_runtime PUBLIC -fno-short-enums)
+    target_compile_options(snesrecomp_platform PUBLIC -fno-short-enums)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SnesRecompPlatformOverlays.cmake")
 
 function(snesrecomp_platform_target_glsl_presets target)
@@ -95,6 +139,32 @@ function(snesrecomp_platform_target_glsl_presets target)
     snesrecomp_target_glsl_shader(${target})
 endfunction()
 
+# Exactly one host-boot implementation is attached to the game target. Console
+# adapters supply their own source; desktop builds use the recomp-ui launcher.
+function(snesrecomp_platform_target_host_boot target)
+    cmake_parse_arguments(HB "" "RECOMP_UI_ROOT" "" ${ARGN})
+
+    if(NOT TARGET "${target}")
+        message(FATAL_ERROR "Unknown host boot target: ${target}")
+    endif()
+
+    if(SNESRECOMP_PLATFORM_HOST_BOOT_SOURCE)
+        target_sources(${target} PRIVATE
+            "${SNESRECOMP_PLATFORM_HOST_BOOT_SOURCE}")
+        message(STATUS "${target}: host boot = console (no launcher)")
+    else()
+        if(NOT EXISTS "${HB_RECOMP_UI_ROOT}/src/recomp_launcher.h")
+            message(FATAL_ERROR
+                "Desktop host boot needs RECOMP_UI_ROOT <recomp-ui source tree>; got '${HB_RECOMP_UI_ROOT}'")
+        endif()
+        target_sources(${target} PRIVATE
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/src/host_boot_desktop.c")
+        target_include_directories(${target} PRIVATE
+            "${HB_RECOMP_UI_ROOT}/src")
+        message(STATUS "${target}: host boot = desktop (recomp-ui launcher)")
+    endif()
+endfunction()
+
 option(SNESRECOMP_PLATFORM_BUILD_TESTS
     "Build snesrecomp-platform smoke tests" OFF)
 
@@ -106,6 +176,13 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
         snesrecomp::runtime)
     add_test(NAME snesrecomp_platform_runtime_policy_smoke
         COMMAND snesrecomp_platform_runtime_policy_smoke)
+
+    add_executable(snesrecomp_platform_rom_verify_smoke
+        tests/rom_verify_smoke.c)
+    target_link_libraries(snesrecomp_platform_rom_verify_smoke PRIVATE
+        snesrecomp::runtime)
+    add_test(NAME snesrecomp_platform_rom_verify_smoke
+        COMMAND snesrecomp_platform_rom_verify_smoke)
 
     add_executable(snesrecomp_platform_smoke
         tests/presenter_smoke.c)
@@ -120,6 +197,13 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
     endif()
     add_test(NAME snesrecomp_platform_smoke
         COMMAND snesrecomp_platform_smoke)
+
+    add_executable(snesrecomp_platform_mode7_smoke
+        tests/snes_ppu_mode7_smoke.c)
+    target_link_libraries(snesrecomp_platform_mode7_smoke PRIVATE
+        snesrecomp::platform)
+    add_test(NAME snesrecomp_platform_mode7_smoke
+        COMMAND snesrecomp_platform_mode7_smoke)
     set_tests_properties(snesrecomp_platform_smoke PROPERTIES
         ENVIRONMENT "SDL_VIDEODRIVER=dummy")
     if(SNESRECOMP_PLATFORM_ENABLE_OPENGL)

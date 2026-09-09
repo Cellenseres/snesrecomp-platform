@@ -40,7 +40,6 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
     set(_loop_old [=[
     for (; steps < step_cap; steps++) {
         const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;
-#if SNESRECOMP_REVERSE_DEBUG
 ]=])
     set(_loop_new [=[
     for (; steps < step_cap; steps++) {
@@ -59,7 +58,6 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
             return 1;
         }
 
-#if SNESRECOMP_REVERSE_DEBUG
 ]=])
     string(FIND "${_patched}" "${_loop_old}" _loop_pos)
     if(_loop_pos EQUAL -1)
