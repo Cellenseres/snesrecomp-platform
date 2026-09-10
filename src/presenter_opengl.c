@@ -14,6 +14,7 @@ typedef struct OpenGlPresenterContext {
     SDL_GLContext gl_context;
     GLuint texture;
     GLuint vertex_array;
+    GLuint preset_vertex_array;
     GLuint vertex_buffer;
     GLuint program;
     SnesRecompPixelFormat texture_format;
@@ -369,8 +370,12 @@ static bool create_geometry(SnesRecompPresenter *presenter) {
         (OpenGlPresenterContext *)presenter->context;
 
     glGenVertexArrays(1, &context->vertex_array);
+    /* A preset sets its own vertex attribute pointers and disables them again
+     * on whatever array is bound, so give it one of its own. */
+    glGenVertexArrays(1, &context->preset_vertex_array);
     glGenBuffers(1, &context->vertex_buffer);
-    if (!context->vertex_array || !context->vertex_buffer) {
+    if (!context->vertex_array || !context->preset_vertex_array ||
+        !context->vertex_buffer) {
         snesrecomp_presenter_set_error(
             presenter, "OpenGL geometry allocation failed");
         return false;
@@ -479,6 +484,8 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
         glDeleteBuffers(1, &context->vertex_buffer);
     if (context->vertex_array)
         glDeleteVertexArrays(1, &context->vertex_array);
+    if (context->preset_vertex_array)
+        glDeleteVertexArrays(1, &context->preset_vertex_array);
     if (context->texture)
         glDeleteTextures(1, &context->texture);
     if (context->gl_context)
@@ -524,6 +531,7 @@ static bool opengl_present_texture(
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (context->preset) {
+        glBindVertexArray(context->preset_vertex_array);
         context->preset_interface->render(
             context->preset, texture, source_width, source_height,
             viewport_x, viewport_y, viewport_width, viewport_height);
