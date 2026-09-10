@@ -44,6 +44,7 @@ typedef struct OpenGlPresenterContext {
     size_t mode7_obj_capacity;
     uint8_t *mode7_window_pixels;
     size_t mode7_window_capacity;
+    unsigned mode7_self_checks;
 } OpenGlPresenterContext;
 
 static bool set_sdl_error(
@@ -909,6 +910,75 @@ static bool opengl_present_mode7_hd(
                 (float)map_height * 8.0f * 256.0f);
     glBindVertexArray(context->vertex_array);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    /* The fragment shader is verified pixel exact against the CPU reference
+     * renderer, so a black frame means the geometry or the uploads never
+     * reached the GPU. glReadPixels stalls the pipeline, so sample only a few
+     * early frames, and stay silent unless nothing was rasterised. */
+    if (context->mode7_self_checks < 3u && frame->map_source &&
+        flags[(cap->visible_height / 2u) * 4u] != 0u) {
+        GLint texture_w = 0, texture_h = 0;
+        GLenum error;
+        unsigned map_nonzero = 0, main_rgb = 0, math_bits = 0, bg_bits = 0;
+        unsigned drawn = 0;
+        const unsigned probe_line = cap->visible_height / 2u;
+        uint8_t probe[64u * 4u];
+
+        context->mode7_self_checks++;
+        for (int i = 0; i < map_width * map_height; i++)
+            if (map_pixels[i])
+                map_nonzero++;
+        for (size_t i = 0; i < (size_t)cap->canvas_width *
+                               cap->visible_height; i++) {
+            const uint8_t bits = context->mode7_window_pixels[i];
+            if (bits & SNESRECOMP_SEMANTIC_MAIN_RGB) main_rgb++;
+            if (bits & SNESRECOMP_SEMANTIC_MATH) math_bits++;
+            if (bits & SNESRECOMP_SEMANTIC_BG1_MAIN) bg_bits++;
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, context->mode7_map_texture);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,
+                                 &texture_w);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT,
+                                 &texture_h);
+        glBindFramebuffer(GL_FRAMEBUFFER, context->mode7_fbo);
+        memset(probe, 0, sizeof probe);
+        glReadPixels(target_width / 4, target_height / 2, 64, 1, GL_RGBA,
+                     GL_UNSIGNED_BYTE, probe);
+        for (unsigned i = 0; i < 64u; i++)
+            if (probe[i * 4u] | probe[i * 4u + 1u] | probe[i * 4u + 2u])
+                drawn++;
+        error = glGetError();
+        if (drawn && error == GL_NO_ERROR)
+            return opengl_present_texture(
+                presenter, context->mode7_target, target_width,
+                target_height, (int)cap->canvas_width,
+                (int)cap->visible_height);
+        fprintf(stderr,
+            "[video] HD Mode 7 self-check: map host=%dx%d nonzero=%u "
+            "driver=%dx%d | window bg1=%u main_rgb=%u math=%u of %u | "
+            "line %u brightness=%u margins=%u/%u enables=$%02X "
+            "affine=%.0f,%.0f step=%.0f,%.0f | readback non-black=%u/64 "
+            "| extra=%u/%u canvas_extra=%u preset=%d "
+            "| glerr=0x%04X\n",
+            map_width, map_height, map_nonzero, texture_w, texture_h,
+            bg_bits, main_rgb, math_bits,
+            (unsigned)((size_t)cap->canvas_width * cap->visible_height),
+            probe_line, (unsigned)flags[probe_line * 4u],
+            (unsigned)flags[probe_line * 4u + 1u],
+            (unsigned)flags[probe_line * 4u + 3u],
+            (unsigned)flags[probe_line * 4u + 2u],
+            (double)affine[probe_line * 4u],
+            (double)affine[probe_line * 4u + 1u],
+            (double)affine[probe_line * 4u + 2u],
+            (double)affine[probe_line * 4u + 3u],
+            drawn,
+            (unsigned)cap->layout.extra_left_cur,
+            (unsigned)cap->layout.extra_right_cur,
+            (unsigned)cap->canvas_extra,
+            context->preset ? 1 : 0,
+            (unsigned)error);
+    }
 
     return opengl_present_texture(
         presenter, context->mode7_target, target_width, target_height,
