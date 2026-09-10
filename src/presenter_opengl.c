@@ -1,4 +1,5 @@
 #include "snesrecomp_platform/presenter_backend.h"
+#include "snesrecomp_platform/snes_ppu_semantic_gpu.h"
 
 #include "gl_core_3_1.h"
 #include <SDL3/SDL.h>
@@ -34,10 +35,14 @@ typedef struct OpenGlPresenterContext {
     GLuint mode7_line_texture;
     GLuint mode7_flags_texture;
     GLuint mode7_obj_texture;
+    GLuint mode7_window_texture;
+    GLuint mode7_math_texture;
     int mode7_target_width;
     int mode7_target_height;
     uint8_t *mode7_obj_pixels;
     size_t mode7_obj_capacity;
+    uint8_t *mode7_window_pixels;
+    size_t mode7_window_capacity;
 } OpenGlPresenterContext;
 
 static bool set_sdl_error(
@@ -184,13 +189,20 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
         "uniform sampler2D line_texture;\n"
         "uniform sampler2D flags_texture;\n"
         "uniform sampler2D obj_texture;\n"
+        "uniform sampler2D window_texture;\n"
+        "uniform sampler2D math_texture;\n"
         "uniform float hd_scale;\n"
         "uniform float canvas_extra;\n"
         "uniform float native_height;\n"
+        "uniform vec2 map_fixed_wrap;\n"
         "float byte_value(float v) { return floor(v * 255.0 + 0.5); }\n"
-        "vec3 palette_rgb(float index, float brightness) {\n"
-        "  vec3 c5 = floor(texelFetch(palette_texture,\n"
+        "vec3 palette_rgb5(float index) {\n"
+        "  return floor(texelFetch(palette_texture,\n"
         "      ivec2(int(index), 0), 0).rgb * 255.0 + 0.5);\n"
+        "}\n"
+        "vec3 brightness_rgb(vec3 c5, float brightness, bool half) {\n"
+        "  if (half) c5 = floor(c5 * 0.5);\n"
+        "  c5 = min(c5, vec3(31.0));\n"
         "  vec3 c8 = c5 * 8.0 + floor(c5 * 0.25);\n"
         "  return floor(c8 * brightness / 15.0) / 255.0;\n"
         "}\n"
@@ -206,12 +218,20 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
         "  float local_hd_x = gl_FragCoord.x - canvas_extra * hd_scale;\n"
         "  bool in_bg = local_hd_x >= -margin_left * hd_scale &&\n"
         "               local_hd_x < (256.0 + margin_right) * hd_scale;\n"
+        "  int native_xi = int(floor(gl_FragCoord.x / hd_scale));\n"
+        "  int window_bits = int(byte_value(texelFetch(window_texture,\n"
+        "      ivec2(native_xi, line), 0).r));\n"
+        "  bool bg_window_visible = (window_bits & 1) != 0;\n"
+        "  bool obj_window_visible = (window_bits & 2) != 0;\n"
+        "  bool obj_sub_visible = (window_bits & 4) != 0;\n"
+        "  bool main_rgb_visible = (window_bits & 64) != 0;\n"
+        "  bool math_visible = (window_bits & 128) != 0;\n"
         "  float bg_index = 0.0;\n"
-        "  if (in_bg && (enables & 1) != 0) {\n"
+        "  if (in_bg && bg_window_visible && (enables & 1) != 0) {\n"
         "    vec4 affine = texelFetch(line_texture, ivec2(0, line), 0);\n"
         "    float native_x = (local_hd_x + 0.5) / hd_scale - 0.5;\n"
         "    vec2 fixed_coord = floor(affine.xy + affine.zw * native_x);\n"
-        "    fixed_coord -= floor(fixed_coord / 262144.0) * 262144.0;\n"
+        "    fixed_coord -= floor(fixed_coord / map_fixed_wrap) * map_fixed_wrap;\n"
         "    ivec2 pixel = ivec2(floor(fixed_coord / 256.0));\n"
         "    ivec2 tile_xy = pixel / 8;\n"
         "    int tile = int(byte_value(texelFetch(map_texture, tile_xy, 0).r));\n"
@@ -220,14 +240,40 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
         "    bg_index = byte_value(texelFetch(char_texture,\n"
         "        ivec2(address & 127, address >> 7), 0).r);\n"
         "  }\n"
-        "  int native_xi = int(floor(gl_FragCoord.x / hd_scale));\n"
         "  vec2 obj = texelFetch(obj_texture, ivec2(native_xi, line), 0).rg;\n"
         "  float obj_index = byte_value(obj.r);\n"
         "  float obj_priority = byte_value(obj.g);\n"
-        "  bool obj_wins = (enables & 16) != 0 && obj_index > 0.5 &&\n"
+        "  bool obj_wins = obj_window_visible && (enables & 16) != 0 &&\n"
+        "                  obj_index > 0.5 &&\n"
         "                  (bg_index < 0.5 || obj_priority > 0.5);\n"
         "  float palette_index = obj_wins ? obj_index : bg_index;\n"
-        "  color = vec4(palette_rgb(palette_index, brightness), 1.0);\n"
+        "  int source = obj_wins ? (obj_index >= 192.0 ? 4 : 6)\n"
+        "                        : (bg_index > 0.5 ? 0 : 5);\n"
+        "  vec3 result5 = main_rgb_visible\n"
+        "      ? palette_rgb5(palette_index) : vec3(0.0);\n"
+        "  vec4 math0 = texelFetch(math_texture, ivec2(0, line), 0);\n"
+        "  vec4 math1 = texelFetch(math_texture, ivec2(1, line), 0);\n"
+        "  int cgadsub = int(byte_value(math0.r));\n"
+        "  int cgwsel = int(byte_value(math0.g));\n"
+        "  vec3 fixed5 = vec3(byte_value(math0.b),\n"
+        "                    byte_value(math0.a),\n"
+        "                    byte_value(math1.r));\n"
+        "  bool half = false;\n"
+        "  bool source_math = source < 6 &&\n"
+        "      (cgadsub & (1 << source)) != 0;\n"
+        "  if (math_visible && source_math) {\n"
+        "    bool add_subscreen = (cgwsel & 2) != 0;\n"
+        "    bool sub_has_obj = add_subscreen && obj_sub_visible &&\n"
+        "                       obj_index > 0.5;\n"
+        "    vec3 second5 = sub_has_obj ? palette_rgb5(obj_index) : fixed5;\n"
+        "    half = (cgadsub & 64) != 0 &&\n"
+        "           (!add_subscreen || sub_has_obj);\n"
+        "    if ((cgadsub & 128) != 0)\n"
+        "      result5 = max(result5 - second5, vec3(0.0));\n"
+        "    else\n"
+        "      result5 += second5;\n"
+        "  }\n"
+        "  color = vec4(brightness_rgb(result5, brightness, half), 1.0);\n"
         "}\n";
     OpenGlPresenterContext *context =
         (OpenGlPresenterContext *)presenter->context;
@@ -262,7 +308,7 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
     glUseProgram(context->mode7_program);
     static const char *const samplers[] = {
         "map_texture", "char_texture", "palette_texture", "line_texture",
-        "flags_texture", "obj_texture",
+        "flags_texture", "obj_texture", "window_texture", "math_texture",
     };
     for (unsigned i = 0; i < sizeof samplers / sizeof samplers[0]; i++) {
         const GLint location =
@@ -283,7 +329,7 @@ static void mode7_texture_parameters(void) {
 static bool create_mode7_resources(SnesRecompPresenter *presenter) {
     OpenGlPresenterContext *context =
         (OpenGlPresenterContext *)presenter->context;
-    GLuint textures[6] = {0};
+    GLuint textures[8] = {0};
 
     if (context->mode7_program)
         return true;
@@ -291,17 +337,20 @@ static bool create_mode7_resources(SnesRecompPresenter *presenter) {
         return false;
     glGenFramebuffers(1, &context->mode7_fbo);
     glGenTextures(1, &context->mode7_target);
-    glGenTextures(6, textures);
+    glGenTextures(8, textures);
     context->mode7_map_texture = textures[0];
     context->mode7_char_texture = textures[1];
     context->mode7_palette_texture = textures[2];
     context->mode7_line_texture = textures[3];
     context->mode7_flags_texture = textures[4];
     context->mode7_obj_texture = textures[5];
+    context->mode7_window_texture = textures[6];
+    context->mode7_math_texture = textures[7];
     if (!context->mode7_fbo || !context->mode7_target ||
         !context->mode7_map_texture || !context->mode7_char_texture ||
         !context->mode7_palette_texture || !context->mode7_line_texture ||
-        !context->mode7_flags_texture || !context->mode7_obj_texture) {
+        !context->mode7_flags_texture || !context->mode7_obj_texture ||
+        !context->mode7_window_texture || !context->mode7_math_texture) {
         snesrecomp_presenter_set_error(
             presenter, "HD Mode 7 OpenGL resource allocation failed");
         return false;
@@ -403,6 +452,7 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
         context->preset_interface->destroy(context->preset);
     }
     free(context->mode7_obj_pixels);
+    free(context->mode7_window_pixels);
     if (context->mode7_program)
         glDeleteProgram(context->mode7_program);
     if (context->mode7_fbo)
@@ -416,6 +466,8 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
             context->mode7_line_texture,
             context->mode7_flags_texture,
             context->mode7_obj_texture,
+            context->mode7_window_texture,
+            context->mode7_math_texture,
         };
         glDeleteTextures(
             (GLsizei)(sizeof mode7_textures / sizeof mode7_textures[0]),
@@ -620,6 +672,56 @@ static bool build_mode7_obj_plane(
     return true;
 }
 
+static bool build_mode7_window_plane(
+    SnesRecompPresenter *presenter, const SnesRecompMode7HdFrame *frame,
+    SnesRecompSemanticLineState *lines) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    const SnesPpuFrameCapture *cap = frame->capture;
+    const size_t pixels =
+        (size_t)cap->canvas_width * cap->visible_height;
+    const size_t bytes = pixels * 2u;
+    if (!lines) {
+        snesrecomp_presenter_set_error(
+            presenter, "missing HD Mode 7 semantic line output");
+        return false;
+    }
+    if (context->mode7_window_capacity < bytes) {
+        uint8_t *grown =
+            (uint8_t *)realloc(context->mode7_window_pixels, bytes);
+        if (!grown) {
+            snesrecomp_presenter_set_error(
+                presenter, "out of memory for HD Mode 7 window plane");
+            return false;
+        }
+        context->mode7_window_pixels = grown;
+        context->mode7_window_capacity = bytes;
+    }
+    if (!snesrecomp_ppu_compile_semantic_input(
+            cap, context->mode7_window_pixels,
+            context->mode7_window_pixels + pixels, cap->canvas_width,
+            lines, SNES_PPU_MAX_BANDS)) {
+        snesrecomp_presenter_set_error(
+            presenter, "invalid HD Mode 7 BG1 window state");
+        return false;
+    }
+    /* Bits 1/2 are unavailable to BG2/BG3 in the accepted Mode 7 subset, so
+     * they carry OBJ main/sub permissions in the same compact R8 texture.
+     * BG1-sub remains in its native bit 3 for a future larger subset. */
+    for (size_t i = 0; i < pixels; i++) {
+        const uint8_t obj_bits = context->mode7_window_pixels[pixels + i];
+        if (obj_bits & SNESRECOMP_SEMANTIC_OBJ_MAIN)
+            context->mode7_window_pixels[i] |= 2u;
+        else
+            context->mode7_window_pixels[i] &= (uint8_t)(~2u & 0xFFu);
+        if (obj_bits & SNESRECOMP_SEMANTIC_OBJ_SUB)
+            context->mode7_window_pixels[i] |= 4u;
+        else
+            context->mode7_window_pixels[i] &= (uint8_t)(~4u & 0xFFu);
+    }
+    return true;
+}
+
 static void upload_mode7_texture(GLuint texture, GLint internal_format,
                                  GLenum format, GLenum type,
                                  int width, int height, const void *pixels) {
@@ -674,12 +776,17 @@ static bool opengl_present_mode7_hd(
     uint8_t palette[SNES_PPU_CGRAM_ENTRIES * 4u];
     float affine[SNES_PPU_MAX_BANDS * 4u];
     uint8_t flags[SNES_PPU_MAX_BANDS * 4u];
+    SnesRecompSemanticLineState semantic_lines[SNES_PPU_MAX_BANDS];
     const SnesPpuFrameCapture *cap;
+    const uint8_t *map_pixels;
+    int map_width, map_height;
     int target_width, target_height;
     bool wants_obj = false;
 
     if (!frame || !(cap = frame->capture) || frame->scale != 2u ||
         !frame->lines || frame->line_count < cap->visible_height ||
+        (frame->map_source &&
+         !snesrecomp_ppu_mode7_map_source_valid(frame->map_source)) ||
         snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
         cap->visible_height > SNES_PPU_MAX_BANDS ||
         cap->canvas_width > INT_MAX / 2 ||
@@ -690,7 +797,8 @@ static bool opengl_present_mode7_hd(
     }
     for (unsigned bi = 0; bi < cap->band_count; bi++)
         if (!cap->bands[bi].forced_blank &&
-            (cap->bands[bi].main_enable & 0x10u))
+            ((cap->bands[bi].main_enable |
+              cap->bands[bi].sub_enable) & 0x10u))
             wants_obj = true;
     if (wants_obj && !frame->obj) {
         snesrecomp_presenter_set_error(
@@ -698,14 +806,27 @@ static bool opengl_present_mode7_hd(
         return false;
     }
     if (!make_current(presenter) || !create_mode7_resources(presenter) ||
-        !build_mode7_obj_plane(presenter, frame))
+        !build_mode7_obj_plane(presenter, frame) ||
+        !build_mode7_window_plane(presenter, frame, semantic_lines))
         return false;
 
     target_width = (int)cap->canvas_width * 2;
     target_height = (int)cap->visible_height * 2;
     if (!allocate_mode7_target(presenter, target_width, target_height) ||
-        !snesrecomp_ppu_mode7_unpack_vram(cap->vram, map_tex, char_tex))
+        !snesrecomp_ppu_mode7_unpack_vram(cap->vram,
+                                          frame->map_source ? NULL : map_tex,
+                                          char_tex))
         return false;
+
+    if (frame->map_source) {
+        map_pixels = frame->map_source->tiles;
+        map_width = (int)frame->map_source->width_tiles;
+        map_height = (int)frame->map_source->height_tiles;
+    } else {
+        map_pixels = map_tex;
+        map_width = 128;
+        map_height = 128;
+    }
 
     memset(flags, 0, sizeof flags);
     for (unsigned y = 0; y < cap->visible_height; y++) {
@@ -734,7 +855,7 @@ static bool opengl_present_mode7_hd(
 
     glActiveTexture(GL_TEXTURE0);
     upload_mode7_texture(context->mode7_map_texture, GL_R8, GL_RED,
-                         GL_UNSIGNED_BYTE, 128, 128, map_tex);
+                         GL_UNSIGNED_BYTE, map_width, map_height, map_pixels);
     glActiveTexture(GL_TEXTURE1);
     upload_mode7_texture(context->mode7_char_texture, GL_R8, GL_RED,
                          GL_UNSIGNED_BYTE, 128, 128, char_tex);
@@ -752,6 +873,15 @@ static bool opengl_present_mode7_hd(
         context->mode7_obj_texture, GL_RG8, GL_RG, GL_UNSIGNED_BYTE,
         (int)cap->canvas_width, (int)cap->visible_height,
         context->mode7_obj_pixels);
+    glActiveTexture(GL_TEXTURE6);
+    upload_mode7_texture(
+        context->mode7_window_texture, GL_R8, GL_RED, GL_UNSIGNED_BYTE,
+        (int)cap->canvas_width, (int)cap->visible_height,
+        context->mode7_window_pixels);
+    glActiveTexture(GL_TEXTURE7);
+    upload_mode7_texture(
+        context->mode7_math_texture, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE,
+        2, (int)cap->visible_height, semantic_lines);
 
     glBindFramebuffer(GL_FRAMEBUFFER, context->mode7_fbo);
     glViewport(0, 0, target_width, target_height);
@@ -766,6 +896,9 @@ static bool opengl_present_mode7_hd(
                 (float)cap->canvas_extra);
     glUniform1f(glGetUniformLocation(context->mode7_program, "native_height"),
                 (float)cap->visible_height);
+    glUniform2f(glGetUniformLocation(context->mode7_program, "map_fixed_wrap"),
+                (float)map_width * 8.0f * 256.0f,
+                (float)map_height * 8.0f * 256.0f);
     glBindVertexArray(context->vertex_array);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 

@@ -10,6 +10,8 @@ static uint16_t s_oam[SNES_PPU_OAM_WORDS];
 static uint8_t s_high_oam[SNES_PPU_HIGH_OAM_BYTES];
 static uint8_t s_reference_a[342 * 224 * 4 * 4];
 static uint8_t s_reference_b[342 * 224 * 4 * 4];
+static uint32_t s_argb_reference[342 * 224];
+static uint8_t s_full_world_map[512 * 512];
 
 static void Put16(uint8_t *p, unsigned offset, int value) {
     const uint16_t v = (uint16_t)value;
@@ -49,6 +51,16 @@ static int Expect(int condition, const char *name) {
         return 1;
     fprintf(stderr, "Mode 7 case failed: %s\n", name);
     return 0;
+}
+
+static uint8_t Expand5(unsigned component) {
+    component = component > 31u ? 31u : component;
+    return (uint8_t)((component << 3u) | (component >> 2u));
+}
+
+static uint32_t Argb5(unsigned r, unsigned g, unsigned b) {
+    return UINT32_C(0xff000000) | ((uint32_t)Expand5(r) << 16u) |
+           ((uint32_t)Expand5(g) << 8u) | Expand5(b);
 }
 
 /* Mirrors the fragment shader after interpolation has produced its signed
@@ -253,6 +265,64 @@ int main(void) {
                          scale == 1u ? "X -43 and 298 sampled at 1x" :
                          scale == 2u ? "X -43 and 298 sampled at 2x" :
                                        "X -43 and 298 sampled at 4x");
+    }
+
+    /* An external logical plane must not inherit the SNES ring's 1024-pixel
+     * wrap. At source X=1024 the native view wraps to tile-map entry zero,
+     * while the 4096-pixel plane reaches tile column 128. */
+    {
+        SnesRecompMode7MapSource full_source = {
+            s_full_world_map, 512u, 512u,
+        };
+        memset(s_vram, 0, sizeof s_vram);
+        memset(s_full_world_map, 1, sizeof s_full_world_map);
+        s_full_world_map[128] = 2u;
+        s_vram[0] = 1u;
+        for (unsigned i = 0; i < 64u; i++) {
+            s_vram[64u + i] = 11u << 8u;
+            s_vram[128u + i] = 22u << 8u;
+        }
+        cap = MakeCapture(&band);
+        cap.canvas_width = 256;
+        cap.canvas_extra = 0;
+        band.main_enable = band.regs[58] = 1;
+        for (unsigned y = 0; y < 224u; y++) {
+            lines[y].start_x = 1024u * 256u;
+            lines[y].start_y = 0;
+            lines[y].step_x = 0;
+            lines[y].step_y = 0;
+        }
+        passed &= Expect(snesrecomp_ppu_mode7_map_source_valid(&full_source),
+                         "512x512 logical Mode 7 source eligible");
+        passed &= Expect(snesrecomp_ppu_mode7_render_reference(
+                             &cap, lines, 224, NULL, 1,
+                             s_reference_a, 256) &&
+                         s_reference_a[0] == 11u,
+                         "native source retains 1024-pixel wrap");
+        for (unsigned scale = 1; scale <= 4; scale *= 2u) {
+            passed &= Expect(snesrecomp_ppu_mode7_render_reference_with_map(
+                                 &cap, lines, 224, NULL, &full_source, scale,
+                                 s_reference_a, 256u * scale) &&
+                             s_reference_a[0] == 22u,
+                             scale == 1u
+                                 ? "logical source beyond ring at 1x"
+                                 : scale == 2u
+                                       ? "logical source beyond ring at 2x"
+                                       : "logical source beyond ring at 4x");
+        }
+        full_source.width_tiles = 4097u;
+        passed &= Expect(!snesrecomp_ppu_mode7_map_source_valid(&full_source),
+                         "oversized logical source fails closed");
+
+        cap = MakeCapture(&band);
+        band.main_enable = band.regs[58] = 1;
+        band.bg[0].margin_left = 43;
+        band.bg[0].margin_right = 43;
+        for (unsigned i = 0; i < SNESRECOMP_MODE7_TEXTURE_TEXELS; i++)
+            s_vram[i] = 0x0701u;
+        passed &= Expect(snesrecomp_ppu_mode7_compile_lines(
+                             &cap, lines, sizeof lines / sizeof lines[0]),
+                         "restore widescreen state after logical source");
     }
 
     band.forced_blank = true;
@@ -499,7 +569,7 @@ int main(void) {
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
                          SNES_PPU_UNSUPPORTED_MAP_SIZE,
                      "large field fails closed");
-    band.regs[12] = 0;
+    cap = MakeCapture(&band);
     band.main_enable = band.regs[58] = 0x11;
     band.mosaic = band.regs[5] = 0x11;
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
@@ -518,21 +588,174 @@ int main(void) {
                      "dormant OBJ windows are accepted");
     band.main_window_enable = band.regs[60] = 1;
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
-                         SNES_PPU_UNSUPPORTED_WINDOWS,
-                     "drawable BG1 window fails closed");
-    band.main_window_enable = band.regs[60] = 0;
-    band.sub_window_enable = band.regs[61] = 0;
+                         SNES_PPU_SUPPORTED,
+                     "drawable BG1 window is supported");
+    band.window_sel = band.regs[48] = 0x02;
+    band.window1_left = band.regs[52] = 40;
+    band.window1_right = band.regs[53] = 80;
+    passed &= Expect(snesrecomp_ppu_mode7_compile_lines(
+                         &cap, lines, sizeof lines / sizeof lines[0]) &&
+                         snesrecomp_ppu_mode7_render_reference(
+                             &cap, lines, 224, NULL, 1,
+                             s_reference_a, cap.canvas_width) &&
+                         s_reference_a[39] == 9u &&
+                         s_reference_a[40] == 0u &&
+                         s_reference_a[80] == 0u &&
+                         s_reference_a[81] == 9u,
+                     "BG1 window masks its inclusive interval");
+    band.window_sel = band.regs[48] = 0x03;
+    passed &= Expect(snesrecomp_ppu_mode7_render_reference(
+                         &cap, lines, 224, NULL, 1,
+                         s_reference_a, cap.canvas_width) &&
+                         s_reference_a[39] == 0u &&
+                         s_reference_a[40] == 9u &&
+                         s_reference_a[80] == 9u &&
+                         s_reference_a[81] == 0u,
+                     "inverted BG1 window preserves its interval");
+    cap.canvas_width = 342;
+    cap.canvas_extra = 43;
+    cap.layout.extra_left_cur = 43;
+    cap.layout.extra_right_cur = 43;
+    cap.layout.window_expand_layers = 1;
+    cap.layout.window_expand_windows = 1;
+    band.bg[0].margin_left = 43;
+    band.bg[0].margin_right = 43;
+    band.window_sel = band.regs[48] = 0x02;
+    band.window1_left = band.regs[52] = 0;
+    band.window1_right = band.regs[53] = 255;
+    passed &= Expect(snesrecomp_ppu_mode7_render_reference(
+                         &cap, lines, 224, NULL, 1,
+                         s_reference_a, cap.canvas_width) &&
+                         s_reference_a[0] == 0u &&
+                         s_reference_a[341] == 0u,
+                     "pinned full-screen window expands through margins");
+    /* Lufia II initializes W12SEL=$33, WH0=$08, WH1=$F7 and TMW=$1F.
+     * With only BG1 in TM, its inverted window is the sole drawable mask.
+     * Expanding by 43 preserves the authentic eight-pixel inset on both
+     * sides while allowing the full-world source everywhere in between. */
+    band.window_sel = 0x00333333u;
+    band.regs[48] = band.regs[49] = band.regs[50] = 0x33;
+    band.window1_left = band.regs[52] = 8;
+    band.window1_right = band.regs[53] = 247;
+    band.main_window_enable = band.regs[60] = 0x1f;
+    cap.layout.window_expand_layers = 0x31;
+    passed &= Expect(snesrecomp_ppu_mode7_render_reference(
+                         &cap, lines, 224, NULL, 1,
+                         s_reference_a, cap.canvas_width) &&
+                         s_reference_a[7] == 0u &&
+                         s_reference_a[8] == 9u &&
+                         s_reference_a[333] == 9u &&
+                         s_reference_a[334] == 0u,
+                     "Lufia II intro BG1 window expands exactly");
     band.main_enable = band.regs[58] = 0x11;
-    band.cgwsel = band.regs[63] = 2;
+    band.main_window_enable = band.regs[60] = 0x10;
+    passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
+                         SNES_PPU_SUPPORTED,
+                     "drawable OBJ window is supported");
+    {
+        SnesRecompObjSliver slivers[2];
+        SnesRecompObjFrame obj;
+        memset(slivers, 0, sizeof slivers);
+        memset(&obj, 0, sizeof obj);
+        s_vram[2u * 16u] = 0x0080u;
+        slivers[0].screen_x = -43;
+        slivers[1].screen_x = -35;
+        for (unsigned i = 0; i < 2u; i++) {
+            slivers[i].tile = 2;
+            slivers[i].palette_base = 128;
+            slivers[i].priority = 1;
+        }
+        obj.slivers = slivers;
+        obj.count = 2;
+        obj.capacity = 2;
+        passed &= Expect(snesrecomp_ppu_mode7_render_reference(
+                             &cap, lines, 224, &obj, 1,
+                             s_reference_a, cap.canvas_width) &&
+                             s_reference_a[0] == 9u &&
+                             s_reference_a[8] == 129u,
+                         "Lufia II OBJ window clips after OAM ordering");
+    }
+    band.main_window_enable = band.regs[60] = 0;
+    band.window_sel = band.regs[48] = 0;
+    band.regs[49] = band.regs[50] = 0;
+    band.window1_left = band.regs[52] = 0;
+    band.window1_right = band.regs[53] = 0;
+    cap.canvas_width = 256;
+    cap.canvas_extra = 0;
+    memset(&cap.layout, 0, sizeof cap.layout);
+    band.sub_window_enable = band.regs[61] = 0;
+    /* Standard CGRAM colour math is part of the portable Mode 7 contract.
+     * Verify fixed add, half subtract and the intro's BG1-main/OBJ-sub form
+     * against the CPU renderer's byte-exact brightness map. */
+    cap = MakeCapture(&band);
+    cap.canvas_width = 256;
+    cap.canvas_extra = 0;
+    band.main_enable = band.regs[58] = 1;
+    memset(s_vram, 0, sizeof s_vram);
+    memset(s_cgram, 0, sizeof s_cgram);
+    s_vram[0] = 1u;
+    for (unsigned i = 0; i < 64u; i++)
+        s_vram[64u + i] = 9u << 8u;
+    s_cgram[9] = (uint16_t)(10u | (20u << 5u) | (30u << 10u));
+    band.fixed_colour = (uint16_t)(4u | (8u << 5u) | (4u << 10u));
+    band.cgadsub = band.regs[62] = 0x01;
+    passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
+                         SNES_PPU_SUPPORTED &&
+                     snesrecomp_ppu_mode7_compile_lines(
+                         &cap, lines, sizeof lines / sizeof lines[0]) &&
+                     snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
+                         &cap, lines, 224, NULL, NULL, 1,
+                         (uint8_t *)s_argb_reference,
+                         256u * sizeof(uint32_t)) &&
+                     s_argb_reference[0] == Argb5(14u, 28u, 31u),
+                     "fixed-colour addition");
+    band.cgadsub = band.regs[62] = 0xc1;
+    passed &= Expect(
+        snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
+            &cap, lines, 224, NULL, NULL, 1,
+            (uint8_t *)s_argb_reference,
+            256u * sizeof(uint32_t)) &&
+            s_argb_reference[0] == Argb5(3u, 6u, 13u),
+        "half fixed-colour subtraction");
+    {
+        SnesRecompObjSliver sliver;
+        SnesRecompObjFrame obj;
+        memset(&sliver, 0, sizeof sliver);
+        memset(&obj, 0, sizeof obj);
+        s_vram[2u * 16u] = 0x0080u;
+        s_cgram[129] = (uint16_t)(2u | (4u << 5u) | (6u << 10u));
+        sliver.line = 0;
+        sliver.screen_x = 0;
+        sliver.tile = 2;
+        sliver.palette_base = 128;
+        sliver.priority = 1;
+        obj.slivers = &sliver;
+        obj.count = obj.capacity = 1;
+        band.sub_enable = band.regs[59] = 0x10;
+        band.cgwsel = band.regs[63] = 0x02;
+        band.cgadsub = band.regs[62] = 0x41;
+        passed &= Expect(
+            snesrecomp_ppu_mode7_supports(&cap) == SNES_PPU_SUPPORTED &&
+                snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
+                    &cap, lines, 224, &obj, NULL, 1,
+                    (uint8_t *)s_argb_reference,
+                    256u * sizeof(uint32_t)) &&
+                s_argb_reference[0] == Argb5(6u, 12u, 18u),
+            "BG1 main plus half OBJ subscreen");
+    }
+    band.sub_enable = band.regs[59] = 0;
+    band.cgwsel = band.regs[63] = 1;
+    band.cgadsub = band.regs[62] = 0;
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
                          SNES_PPU_UNSUPPORTED_COLOUR_MATH,
-                     "drawable OBJ subscreen colour math fails closed");
+                     "direct-colour Mode 7 still fails closed");
     band.cgwsel = band.regs[63] = 0;
     band.sub_enable = band.regs[59] = 1;
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
                          SNES_PPU_UNSUPPORTED_SUBSCREEN,
                      "drawable BG1 subscreen fails closed");
     band.sub_enable = band.regs[59] = 0;
+    band.main_enable = band.regs[58] = 0x11;
     cap.oam = NULL;
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
                          SNES_PPU_UNSUPPORTED_OBJ,

@@ -108,6 +108,9 @@ typedef struct SnesRecompMode7HdFrame {
     const SnesRecompMode7Line *lines;
     unsigned line_count;
     const SnesRecompObjFrame *obj;
+    /* Optional full logical tile-number plane. NULL preserves the native
+     * 128x128 Mode 7 map captured from VRAM. */
+    const SnesRecompMode7MapSource *map_source;
     unsigned scale;
 } SnesRecompMode7HdFrame;
 
