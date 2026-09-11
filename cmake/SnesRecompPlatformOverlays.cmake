@@ -116,7 +116,7 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
     set(_renderer_old [=[
     if (m->has_renderer) {
         row_label("Renderer", th);
-        if (ImGui::Button(launcher_model_renderer_label(m), ImVec2(px(220), px(30))))
+        if (ImGui::Button(ui_text(launcher_model_renderer_label(m)), ImVec2(px(220), px(30))))
             launcher_model_toggle_renderer(m);
     }
 ]=])
@@ -126,7 +126,7 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
         if (m->renderer_labels && m->num_renderers > 0) {
             ImGui::SetNextItemWidth(px(220));
             if (ImGui::BeginCombo("##renderer",
-                                  launcher_model_renderer_label(m))) {
+                                  ui_text(launcher_model_renderer_label(m)))) {
                 for (int i = 0; i < m->num_renderers; ++i) {
                     const bool selected = m->s.renderer == i;
                     if (ImGui::Selectable(m->renderer_labels[i], selected))
@@ -136,7 +136,7 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
                 }
                 ImGui::EndCombo();
             }
-        } else if (ImGui::Button(launcher_model_renderer_label(m),
+        } else if (ImGui::Button(ui_text(launcher_model_renderer_label(m)),
                                  ImVec2(px(220), px(30)))) {
             launcher_model_toggle_renderer(m);
         }
@@ -154,14 +154,14 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
     set(_legacy_fullscreen_old [=[
         row_label("Fullscreen", th, cw);
         ImGui::PushID("fullscreen");
-        if (ImGui::Button(launcher_model_fullscreen_label(m), ImVec2(px(120), px(30))))
+        if (ImGui::Button(ui_text(launcher_model_fullscreen_label(m)), ImVec2(px(120), px(30))))
             launcher_model_cycle_fullscreen(m);
         ImGui::PopID();
 ]=])
     set(_legacy_fullscreen_new [=[
         row_label("Fullscreen", th, cw);
         ImGui::PushID("fullscreen");
-        if (ImGui::Button(launcher_model_fullscreen_label(m), ImVec2(px(120), px(30))))
+        if (ImGui::Button(ui_text(launcher_model_fullscreen_label(m)), ImVec2(px(120), px(30))))
             launcher_model_cycle_fullscreen(m);
         ImGui::PopID();
         if (m->widescreen_supported) {
