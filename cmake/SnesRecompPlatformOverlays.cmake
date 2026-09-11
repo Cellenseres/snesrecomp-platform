@@ -66,6 +66,31 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
     endif()
     string(REPLACE "${_loop_old}" "${_loop_new}"
         _patched "${_patched}")
+
+    # A deadline unwind now leaves the bridge instead of switching the
+    # interpreted coroutine, and the bridge decides which by a flag the
+    # deadline test sets as a side effect. The yield path it replaces resumes
+    # at the unwind PC inside the same frame, with the compiled callsite's JSR
+    # frame still on the guest stack; returning instead hands that frame to
+    # nobody and the guest eventually returns through it. Drop the side effect
+    # so the flag stays clear and the coroutine switch is taken, which is the
+    # behaviour this platform's nested-LLE deadline policy above assumes.
+    set(_deadline_old [=[
+    if (reached)
+        s_lle_next_unwind_is_deadline = 1;
+    return reached;
+]=])
+    set(_deadline_new [=[
+    return reached;
+]=])
+    string(FIND "${_patched}" "${_deadline_old}" _deadline_pos)
+    if(_deadline_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned LLE deadline unwind context changed.")
+    endif()
+    string(REPLACE "${_deadline_old}" "${_deadline_new}"
+        _patched "${_patched}")
+
     file(WRITE "${_overlay}" "${_patched}")
 
     set_source_files_properties("${_overlay}" PROPERTIES
