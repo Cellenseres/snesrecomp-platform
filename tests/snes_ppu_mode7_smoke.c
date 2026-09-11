@@ -87,6 +87,186 @@ static uint8_t SampleCoreVram(const uint16_t *vram,
                                ((x >> 8) & 7u)] >> 8);
 }
 
+/* Sub-register refinement. A band names its own step, a zero refinement
+ * changes nothing, and origin and angle each carry a whole value: pinning a
+ * remainder to a foreign whole number costs a full pixel or step at every
+ * wrap. */
+
+static SnesRecompMode7Line s_refined_a[224];
+static SnesRecompMode7Line s_refined_b[224];
+
+enum {
+    REFINE_CENTER_X = 0x0642,
+    REFINE_CENTER_Y = 0x0317
+};
+
+static void UnitCosSin(unsigned index, unsigned steps, int *cos_out,
+                       int *sin_out) {
+    const double turn = 6.283185307179586476925286766559;
+    const double a = (double)(index % steps) * (turn / (double)steps);
+    double c = 1.0, s = a, tc = 1.0, ts = a;
+    unsigned n;
+
+    for (n = 1; n <= 12u; n++) {
+        tc *= -a * a / (double)((2u * n - 1u) * (2u * n));
+        c += tc;
+        ts *= -a * a / (double)((2u * n) * (2u * n + 1u));
+        s += ts;
+    }
+    *cos_out = (int)(c * 256.0 + (c < 0.0 ? -0.5 : 0.5));
+    *sin_out = (int)(s * 256.0 + (s < 0.0 ? -0.5 : 0.5));
+}
+
+/* A uniform scale times a rotation, scroll trailing the centre. */
+static SnesPpuFrameCapture MakeRotationCapture(SnesPpuRasterBand *band,
+                                               unsigned index, int scale) {
+    SnesPpuFrameCapture cap = MakeCapture(band);
+    int table_cos, table_sin;
+
+    UnitCosSin(index, 256u, &table_cos, &table_sin);
+    band->main_enable = band->regs[58] = 1;
+    Put16(band->regs, 30, table_cos * scale / 256);
+    Put16(band->regs, 32, table_sin * scale / 256);
+    Put16(band->regs, 34, -table_sin * scale / 256);
+    Put16(band->regs, 36, table_cos * scale / 256);
+    Put16(band->regs, 38, REFINE_CENTER_X);
+    Put16(band->regs, 40, REFINE_CENTER_Y);
+    Put16(band->regs, 42, REFINE_CENTER_X - 0x80);
+    Put16(band->regs, 44, REFINE_CENTER_Y - 0x70);
+    return cap;
+}
+
+/* Signed difference inside the 18-bit Mode 7 plane. */
+static int32_t PlaneDelta(uint32_t a, uint32_t b) {
+    int32_t d = (int32_t)((a - b) & SNESRECOMP_MODE7_COORD_MASK);
+    return (d & 0x20000) ? d - 0x40000 : d;
+}
+
+static SnesRecompMode7Refinement Refinement(uint32_t x, uint32_t y,
+                                            int32_t delta) {
+    SnesRecompMode7Refinement r;
+    r.origin_x = x;
+    r.origin_y = y;
+    r.angle_delta = delta;
+    return r;
+}
+
+static int RefinementCases(void) {
+    static const int kScales[] = {64, 128, 256, 320, 512, 1024};
+    const unsigned height = 224u;
+    SnesPpuRasterBand band;
+    SnesPpuFrameCapture cap;
+    SnesRecompMode7Refinement refinement;
+    unsigned index, scale, recovered, y, tick;
+    int32_t cos_q30, sin_q30, previous;
+    int passed = 1, wrong = 0, refused = 0, worst = 0;
+    int64_t one = INT64_C(1) << 30;
+
+    for (scale = 0; scale < sizeof kScales / sizeof kScales[0]; scale++) {
+        for (index = 0; index < 256u; index++) {
+            cap = MakeRotationCapture(&band, index, kScales[scale]);
+            if (!snesrecomp_ppu_mode7_band_rotation_step(&band, 256u,
+                                                         &recovered))
+                refused++;
+            else if (recovered != index)
+                wrong++;
+        }
+    }
+    passed &= Expect(wrong == 0, "every rotation step names itself");
+    passed &= Expect(refused == 0, "no usable matrix refuses a step");
+
+    cap = MakeRotationCapture(&band, 0u, 0);
+    passed &= Expect(!snesrecomp_ppu_mode7_band_rotation_step(&band, 256u,
+                                                              &recovered),
+                     "a zero matrix names no step");
+
+    snesrecomp_ppu_mode7_substep_rotation(0, &cos_q30, &sin_q30);
+    passed &= Expect(cos_q30 == (int32_t)one && sin_q30 == 0,
+                     "a zero delta is the identity rotation");
+    previous = 0;
+    wrong = 0;
+    for (tick = 1u; tick < 512u; tick++) {
+        int64_t norm;
+        snesrecomp_ppu_mode7_substep_rotation((int32_t)tick, &cos_q30,
+                                              &sin_q30);
+        norm = (int64_t)cos_q30 * cos_q30 + (int64_t)sin_q30 * sin_q30;
+        if (norm < one * one - (INT64_C(1) << 40) ||
+            norm > one * one + (INT64_C(1) << 40) || sin_q30 <= previous)
+            wrong++;
+        previous = sin_q30;
+    }
+    passed &= Expect(wrong == 0,
+                     "sub-step rotation keeps unit length and advances");
+
+    /* Up to the multiplier truncation this path omits. */
+    cap = MakeRotationCapture(&band, 37u, 320);
+    refinement = Refinement((uint32_t)REFINE_CENTER_X * 256u,
+                            (uint32_t)REFINE_CENTER_Y * 256u, 0);
+    passed &= Expect(snesrecomp_ppu_mode7_compile_lines(&cap, s_refined_a,
+                                                        height) &&
+                         snesrecomp_ppu_mode7_compile_lines_refined(
+                             &cap, s_refined_b, height, &refinement),
+                     "both compilers accept the band");
+    wrong = 0;
+    for (y = 0; y < height; y++) {
+        const int32_t dx = PlaneDelta(s_refined_b[y].start_x,
+                                      s_refined_a[y].start_x);
+        const int32_t dy = PlaneDelta(s_refined_b[y].start_y,
+                                      s_refined_a[y].start_y);
+        if (dx < 0 || dx > 189 || dy < 0 || dy > 189 ||
+            s_refined_b[y].step_x != s_refined_a[y].step_x ||
+            s_refined_b[y].step_y != s_refined_a[y].step_y)
+            wrong++;
+    }
+    passed &= Expect(wrong == 0, "a zero refinement reproduces the compile");
+
+    /* Walking the origin moves the plane by exactly that, wraps included. */
+    cap = MakeRotationCapture(&band, 91u, 448);
+    worst = 0;
+    for (tick = 0; tick <= 1024u; tick++) {
+        refinement = Refinement((uint32_t)REFINE_CENTER_X * 256u + tick,
+                                (uint32_t)REFINE_CENTER_Y * 256u - tick, 0);
+        if (!snesrecomp_ppu_mode7_compile_lines_refined(&cap, s_refined_b,
+                                                        height, &refinement))
+            break;
+        if (tick) {
+            const int32_t dx = PlaneDelta(s_refined_b[0].start_x,
+                                          (uint32_t)previous);
+            if (dx != 1)
+                worst = 256;
+        }
+        previous = (int32_t)s_refined_b[0].start_x;
+    }
+    passed &= Expect(tick > 1024u && worst == 0,
+                     "an origin walk moves the plane by what it walked");
+
+    /* The delta may run past a step without snapping back. */
+    worst = 0;
+    for (tick = 0; tick <= 600u; tick++) {
+        refinement = Refinement((uint32_t)REFINE_CENTER_X * 256u,
+                                (uint32_t)REFINE_CENTER_Y * 256u,
+                                (int32_t)tick);
+        if (!snesrecomp_ppu_mode7_compile_lines_refined(&cap, s_refined_b,
+                                                        height, &refinement))
+            break;
+        if (tick) {
+            const int32_t d = PlaneDelta(s_refined_b[0].start_x,
+                                         (uint32_t)previous);
+            const int32_t m = d < 0 ? -d : d;
+            if (m > worst)
+                worst = m;
+        }
+        previous = (int32_t)s_refined_b[0].start_x;
+    }
+    passed &= Expect(tick > 600u && worst <= 16,
+                     "an angle delta past a step does not snap back");
+
+    passed &= Expect(!snesrecomp_ppu_mode7_compile_lines_refined(
+                         &cap, s_refined_b, height, NULL),
+                     "a missing refinement fails closed");
+    return passed;
+}
+
 int main(void) {
     SnesPpuRasterBand band;
     SnesPpuFrameCapture cap = MakeCapture(&band);
@@ -96,6 +276,8 @@ int main(void) {
     uint8_t map_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
     uint8_t char_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
     int passed = 1;
+
+    passed &= RefinementCases();
 
     passed &= Expect(snesrecomp_ppu_mode7_supports(&cap) ==
                          SNES_PPU_SUPPORTED,

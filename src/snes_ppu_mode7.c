@@ -225,6 +225,137 @@ bool snesrecomp_ppu_mode7_compile_lines(
     return true;
 }
 
+static int64_t RotateAxis(int64_t primary, int64_t secondary, int32_t cos_q30,
+                          int32_t sin_q30) {
+    return ((int64_t)cos_q30 * primary + (int64_t)sin_q30 * secondary) >> 30;
+}
+
+void snesrecomp_ppu_mode7_substep_rotation(int32_t delta, int32_t *cos_q30,
+                                           int32_t *sin_q30) {
+    /* A few table steps at most: six terms, no libm. */
+    const double turn = 6.283185307179586476925286766559;
+    const double a = (double)delta * (turn / 65536.0);
+    const double a2 = a * a;
+    const double c = 1.0 - a2 * (0.5 - a2 * (1.0 / 24.0));
+    const double s = a * (1.0 - a2 * (1.0 / 6.0 - a2 * (1.0 / 120.0)));
+
+    if (!cos_q30 || !sin_q30)
+        return;
+    *cos_q30 = (int32_t)(c * 1073741824.0 + 0.5);
+    *sin_q30 = (int32_t)(s * 1073741824.0 + 0.5);
+}
+
+/* Amplitude 256, matching 8.8 matrix entries. */
+static void TableCosSin(unsigned index, unsigned steps, int32_t *cos_out,
+                        int32_t *sin_out) {
+    const double turn = 6.283185307179586476925286766559;
+    const double a = (double)(index % steps) * (turn / (double)steps);
+    double c = 1.0, s = a, tc = 1.0, ts = a;
+
+    for (unsigned n = 1; n <= 12u; n++) {
+        tc *= -a * a / (double)((2u * n - 1u) * (2u * n));
+        c += tc;
+        ts *= -a * a / (double)((2u * n) * (2u * n + 1u));
+        s += ts;
+    }
+    *cos_out = (int32_t)(c * 256.0 + (c < 0.0 ? -0.5 : 0.5));
+    *sin_out = (int32_t)(s * 256.0 + (s < 0.0 ? -0.5 : 0.5));
+}
+
+bool snesrecomp_ppu_mode7_band_rotation_step(const SnesPpuRasterBand *band,
+                                             unsigned steps, unsigned *step) {
+    int64_t best = INT64_MAX;
+    unsigned best_index = 0;
+    bool found = false;
+    int32_t a, b;
+
+    if (!band || !step || steps < 4u || steps > 4096u)
+        return false;
+    a = RawS16(band->regs, RAW_M7A);
+    b = RawS16(band->regs, RAW_M7B);
+    /* Below this, neighbouring steps fall inside the rounding of a 16-bit
+     * entry. */
+    if ((a < 0 ? -a : a) + (b < 0 ? -b : b) < 64)
+        return false;
+
+    for (unsigned i = 0; i < steps; i++) {
+        int32_t table_cos, table_sin;
+        int64_t cross, dot;
+
+        TableCosSin(i, steps, &table_cos, &table_sin);
+        dot = (int64_t)a * table_cos + (int64_t)b * table_sin;
+        if (dot <= 0)
+            continue;
+        cross = (int64_t)b * table_cos - (int64_t)a * table_sin;
+        if (cross < 0)
+            cross = -cross;
+        if (cross < best) {
+            best = cross;
+            best_index = i;
+            found = true;
+        }
+    }
+    *step = best_index;
+    return found;
+}
+
+bool snesrecomp_ppu_mode7_compile_lines_refined(
+    const SnesPpuFrameCapture *cap, SnesRecompMode7Line *lines,
+    unsigned capacity, const SnesRecompMode7Refinement *refinement) {
+    int32_t cos_q30, sin_q30;
+
+    if (!lines || !refinement ||
+        snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
+        capacity < cap->visible_height)
+        return false;
+
+    snesrecomp_ppu_mode7_substep_rotation(refinement->angle_delta, &cos_q30,
+                                          &sin_q30);
+    for (unsigned bi = 0; bi < cap->band_count; bi++) {
+        const SnesPpuRasterBand *b = &cap->bands[bi];
+        const uint8_t *r = b->regs;
+        const int32_t a = RawS16(r, RAW_M7A);
+        const int32_t mb = RawS16(r, RAW_M7B);
+        const int32_t c = RawS16(r, RAW_M7C);
+        const int32_t d = RawS16(r, RAW_M7D);
+        const int32_t x_center = Sign13(RawU16(r, RAW_M7X));
+        const int32_t y_center = Sign13(RawU16(r, RAW_M7Y));
+        const int32_t clipped_h =
+            ClipMode7Scroll(Sign13(RawU16(r, RAW_M7H)) - x_center);
+        const int32_t clipped_v =
+            ClipMode7Scroll(Sign13(RawU16(r, RAW_M7V)) - y_center);
+        const bool x_flip = (r[RAW_M7SEL] & MODE7_X_FLIP) != 0;
+        const bool y_flip = (r[RAW_M7SEL] & MODE7_Y_FLIP) != 0;
+        const int32_t rx0 = clipped_h + (x_flip ? 255 : 0);
+        /* The centre cancels inside the matrix, so the origin is a plain
+         * translation. */
+        const int64_t step_x = RotateAxis(a, c, cos_q30, sin_q30);
+        const int64_t step_y = RotateAxis(c, -(int64_t)a, cos_q30, sin_q30);
+
+        for (unsigned y = b->y_begin; y < b->y_end && y < capacity; y++) {
+            /* Capture row zero represents PPU scanline one. */
+            const int32_t ppu_y = (int32_t)y + 1;
+            const int32_t ry =
+                (y_flip ? 255 - ppu_y : ppu_y) + clipped_v;
+            const int64_t flat_x = (int64_t)a * rx0 + (int64_t)mb * ry;
+            const int64_t flat_y = (int64_t)c * rx0 + (int64_t)d * ry;
+            SnesRecompMode7Line *out = &lines[y];
+
+            out->start_x =
+                (uint32_t)(RotateAxis(flat_x, flat_y, cos_q30, sin_q30) +
+                           (int64_t)refinement->origin_x) &
+                SNESRECOMP_MODE7_COORD_MASK;
+            out->start_y =
+                (uint32_t)(RotateAxis(flat_y, -flat_x, cos_q30, sin_q30) +
+                           (int64_t)refinement->origin_y) &
+                SNESRECOMP_MODE7_COORD_MASK;
+            out->step_x = (int32_t)(x_flip ? -step_x : step_x);
+            out->step_y = (int32_t)(x_flip ? -step_y : step_y);
+        }
+    }
+    return true;
+}
+
 unsigned snesrecomp_ppu_mode7_build_strips(
     SnesRecompBgStripVertex *verts, uint16_t *indices,
     const SnesRecompMode7Line *lines, unsigned line_count,

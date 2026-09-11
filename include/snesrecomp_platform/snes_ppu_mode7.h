@@ -77,6 +77,34 @@ bool snesrecomp_ppu_mode7_compile_lines(
  * edges are biased by half a pixel so interpolation at fragment centres lands
  * on the exact integer start value for screen X=0. The fragment backend wraps
  * them with SNESRECOMP_MODE7_COORD_MASK after interpolation. */
+/* Geometry a game carries but the integer M7X/M7Y and sine-table index
+ * cannot express. `origin_x`/`origin_y` replace the centre, in 8.8 plane
+ * coordinates; `angle_delta` turns the captured matrix by 1/65536 turn per
+ * unit. Exact where the matrix is a uniform scale times a rotation, the
+ * usual Mode 7 form, because rotations commute. */
+typedef struct SnesRecompMode7Refinement {
+    uint32_t origin_x;
+    uint32_t origin_y;
+    int32_t angle_delta;
+} SnesRecompMode7Refinement;
+
+/* One entry per visible output line, refined. An enhancement path: it omits
+ * the SNES multiplier truncation, so a zero refinement differs from
+ * snesrecomp_ppu_mode7_compile_lines by up to 189 of the 8.8 units. */
+bool snesrecomp_ppu_mode7_compile_lines_refined(
+    const SnesPpuFrameCapture *cap, SnesRecompMode7Line *lines,
+    unsigned capacity, const SnesRecompMode7Refinement *refinement);
+
+/* The step a band's matrix was built at, for a `steps`-entry table laid out
+ * as M7A:M7B = cos:sin. False when the matrix is too small to name one.
+ * `angle_delta` is expressed relative to it. */
+bool snesrecomp_ppu_mode7_band_rotation_step(const SnesPpuRasterBand *band,
+                                             unsigned steps, unsigned *step);
+
+/* cos and sin of `delta`/65536 of a turn, in Q30. */
+void snesrecomp_ppu_mode7_substep_rotation(int32_t delta, int32_t *cos_q30,
+                                           int32_t *sin_q30);
+
 unsigned snesrecomp_ppu_mode7_build_strips(
     SnesRecompBgStripVertex *verts, uint16_t *indices,
     const SnesRecompMode7Line *lines, unsigned line_count,
