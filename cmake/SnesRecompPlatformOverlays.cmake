@@ -4,7 +4,54 @@ include_guard(GLOBAL)
 option(SNESRECOMP_PLATFORM_LLE_DEADLINE_SEAM
     "Drop snesrecomp's sticky LLE deadline flag so the unwind stays a coroutine switch" ON)
 
+# An hle_func stub has no prologue to overwrite the seeded entry-S, so the
+# ancestor scan matches it and the unwind stops one frame short.
+option(SNESRECOMP_PLATFORM_HLE_ENTRY_S_SEAM
+    "Drop upstream's entry-S seeding in RecompStackPush" ON)
+
+function(snesrecomp_platform_overlay_cpu_infra sources_var snesrecomp_root)
+    if(NOT SNESRECOMP_PLATFORM_HLE_ENTRY_S_SEAM)
+        message(STATUS "snesrecomp-platform: entry-S seam OFF (upstream behaviour)")
+        return()
+    endif()
+
+    set(_upstream "${snesrecomp_root}/runner/src/common_cpu_infra.c")
+    if(NOT EXISTS "${_upstream}")
+        message(FATAL_ERROR "Missing snesrecomp cpu infra: ${_upstream}")
+    endif()
+    file(READ "${_upstream}" _source)
+
+    set(_seed_old [=[
+    g_cpu_entry_s[slot] = g_cpu.S;
+]=])
+    set(_seed_new "")
+    string(FIND "${_source}" "${_seed_old}" _seed_pos)
+    if(_seed_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned RecompStackPush entry-S context changed.")
+    endif()
+    string(REPLACE "${_seed_old}" "${_seed_new}" _patched "${_source}")
+
+    set(_overlay_dir "${CMAKE_BINARY_DIR}/generated/snesrecomp-platform")
+    set(_overlay "${_overlay_dir}/common_cpu_infra.c")
+    file(MAKE_DIRECTORY "${_overlay_dir}")
+    file(WRITE "${_overlay}" "${_patched}")
+
+    set_source_files_properties("${_overlay}" PROPERTIES
+        INCLUDE_DIRECTORIES
+            "${snesrecomp_root}/runner/src;${snesrecomp_root}/runner/src/snes"
+    )
+
+    set(_sources "${${sources_var}}")
+    list(REMOVE_ITEM _sources "${_upstream}")
+    list(APPEND _sources "${_overlay}")
+    set(${sources_var} "${_sources}" PARENT_SCOPE)
+endfunction()
+
 function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
+    snesrecomp_platform_overlay_cpu_infra("${sources_var}" "${snesrecomp_root}")
+    set(${sources_var} "${${sources_var}}" PARENT_SCOPE)
+
     # OFF leaves interp_bridge.c pristine, for an A/B of the unwind policy.
     if(DEFINED SNESRECOMP_PLATFORM_BRIDGE_OVERLAY AND
        NOT SNESRECOMP_PLATFORM_BRIDGE_OVERLAY)
