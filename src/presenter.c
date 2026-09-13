@@ -217,6 +217,16 @@ bool snesrecomp_presenter_get_drawable_size(
     return presenter->ops->get_drawable_size(presenter, width, height);
 }
 
+float snesrecomp_presenter_display_scale(
+    SnesRecompPresenter *presenter) {
+    if (!presenter || !presenter->ops ||
+        !presenter->ops->get_display_scale) {
+        return 1.0f;
+    }
+    const float scale = presenter->ops->get_display_scale(presenter);
+    return scale > 0.0f ? scale : 1.0f;
+}
+
 uint32_t snesrecomp_presenter_capabilities(
     const SnesRecompPresenter *presenter) {
     return presenter ? presenter->capabilities : 0;

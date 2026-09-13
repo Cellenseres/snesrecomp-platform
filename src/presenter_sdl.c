@@ -10,12 +10,170 @@ typedef struct SdlPresenterContext {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *texture;
+    SDL_Texture *overlay_textures[SNESRECOMP_OVERLAY_MAX_LAYERS];
+    int overlay_widths[SNESRECOMP_OVERLAY_MAX_LAYERS];
+    int overlay_heights[SNESRECOMP_OVERLAY_MAX_LAYERS];
+    bool overlay_linear[SNESRECOMP_OVERLAY_MAX_LAYERS];
     SnesRecompPixelFormat texture_format;
     int texture_width;
     int texture_height;
     bool preserve_aspect;
     bool linear_filtering;
 } SdlPresenterContext;
+
+static bool set_sdl_error(
+    SnesRecompPresenter *presenter,
+    const char *operation);
+
+static bool valid_overlay(const SnesRecompOverlayFrame *overlay,
+                          int frame_width, int frame_height) {
+    if (!overlay)
+        return true;
+    if (!overlay->layers || overlay->layer_count == 0 ||
+        overlay->layer_count > SNESRECOMP_OVERLAY_MAX_LAYERS ||
+        overlay->canvas_width <= 0 || overlay->canvas_height <= 0 ||
+        (overlay->space != SNESRECOMP_OVERLAY_SPACE_FRAME &&
+         overlay->space != SNESRECOMP_OVERLAY_SPACE_PRESENTATION) ||
+        (overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME &&
+         (overlay->canvas_width != frame_width ||
+          overlay->canvas_height != frame_height))) {
+        return false;
+    }
+    for (size_t i = 0; i < overlay->layer_count; i++) {
+        const SnesRecompOverlayLayer *layer = &overlay->layers[i];
+        if (!layer->pixels ||
+            layer->pixel_format != SNESRECOMP_PIXEL_FORMAT_ARGB8888 ||
+            layer->width <= 0 || layer->height <= 0 ||
+            layer->pitch < layer->width * 4 || (layer->pitch & 3) != 0 ||
+            layer->display_width <= 0 || layer->display_height <= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool update_overlay_texture(
+    SnesRecompPresenter *presenter,
+    size_t index,
+    const SnesRecompOverlayLayer *layer) {
+    SdlPresenterContext *context =
+        (SdlPresenterContext *)presenter->context;
+    if (!context->overlay_textures[index] ||
+        context->overlay_widths[index] != layer->width ||
+        context->overlay_heights[index] != layer->height) {
+        SDL_Texture *texture = SDL_CreateTexture(
+            context->renderer, SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_STREAMING, layer->width, layer->height);
+        if (!texture)
+            return set_sdl_error(presenter, "SDL_CreateTexture(overlay)");
+        const SDL_BlendMode premultiplied = SDL_ComposeCustomBlendMode(
+            SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+            SDL_BLENDOPERATION_ADD, SDL_BLENDFACTOR_ONE,
+            SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD);
+        if (!SDL_SetTextureBlendMode(texture, premultiplied)) {
+            SDL_DestroyTexture(texture);
+            return set_sdl_error(presenter, "configure overlay texture");
+        }
+        if (context->overlay_textures[index])
+            SDL_DestroyTexture(context->overlay_textures[index]);
+        context->overlay_textures[index] = texture;
+        context->overlay_widths[index] = layer->width;
+        context->overlay_heights[index] = layer->height;
+        context->overlay_linear[index] = !layer->linear_filtering;
+    }
+    if (context->overlay_linear[index] != layer->linear_filtering &&
+        !SDL_SetTextureScaleMode(
+            context->overlay_textures[index],
+            layer->linear_filtering
+                ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST)) {
+        return set_sdl_error(presenter, "SDL_SetTextureScaleMode(overlay)");
+    }
+    context->overlay_linear[index] = layer->linear_filtering;
+    if (!SDL_UpdateTexture(
+            context->overlay_textures[index], NULL,
+            layer->pixels, layer->pitch)) {
+        return set_sdl_error(presenter, "SDL_UpdateTexture(overlay)");
+    }
+    return true;
+}
+
+static bool render_overlay(
+    SnesRecompPresenter *presenter,
+    const SnesRecompOverlayFrame *overlay) {
+    SdlPresenterContext *context =
+        (SdlPresenterContext *)presenter->context;
+    int logical_width = 0, logical_height = 0;
+    int output_width = 0, output_height = 0;
+    SDL_RendererLogicalPresentation logical_mode =
+        SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_FRect base;
+
+    if (!overlay)
+        return true;
+    if (!SDL_GetRenderOutputSize(
+            context->renderer, &output_width, &output_height)) {
+        return set_sdl_error(presenter, "SDL_GetRenderOutputSize");
+    }
+    if (!SDL_GetRenderLogicalPresentation(
+            context->renderer, &logical_width, &logical_height,
+            &logical_mode)) {
+        return set_sdl_error(presenter, "SDL_GetRenderLogicalPresentation");
+    }
+    if (overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME &&
+        logical_mode != SDL_LOGICAL_PRESENTATION_DISABLED) {
+        if (!SDL_GetRenderLogicalPresentationRect(context->renderer, &base))
+            return set_sdl_error(
+                presenter, "SDL_GetRenderLogicalPresentationRect");
+    } else {
+        base.x = 0.0f;
+        base.y = 0.0f;
+        base.w = (float)output_width;
+        base.h = (float)output_height;
+    }
+
+    if (logical_mode != SDL_LOGICAL_PRESENTATION_DISABLED &&
+        !SDL_SetRenderLogicalPresentation(
+            context->renderer, 0, 0,
+            SDL_LOGICAL_PRESENTATION_DISABLED)) {
+        return set_sdl_error(
+            presenter, "disable logical presentation for overlay");
+    }
+
+    bool ok = true;
+    for (size_t i = 0; i < overlay->layer_count; i++) {
+        const SnesRecompOverlayLayer *layer = &overlay->layers[i];
+        SDL_FRect destination = {
+            base.x + base.w * (float)layer->x /
+                (float)overlay->canvas_width,
+            base.y + base.h * (float)layer->y /
+                (float)overlay->canvas_height,
+            base.w * (float)layer->display_width /
+                (float)overlay->canvas_width,
+            base.h * (float)layer->display_height /
+                (float)overlay->canvas_height,
+        };
+        if (!update_overlay_texture(presenter, i, layer)) {
+            ok = false;
+            break;
+        }
+        if (!SDL_RenderTexture(
+                context->renderer, context->overlay_textures[i],
+                NULL, &destination)) {
+            set_sdl_error(presenter, "SDL_RenderTexture(overlay)");
+            ok = false;
+            break;
+        }
+    }
+
+    if (logical_mode != SDL_LOGICAL_PRESENTATION_DISABLED &&
+        !SDL_SetRenderLogicalPresentation(
+            context->renderer, logical_width, logical_height,
+            logical_mode)) {
+        return set_sdl_error(
+            presenter, "restore logical presentation after overlay");
+    }
+    return ok;
+}
 
 static SDL_PixelFormat to_sdl_pixel_format(SnesRecompPixelFormat format) {
     switch (format) {
@@ -104,6 +262,10 @@ static void sdl_destroy(SnesRecompPresenter *presenter) {
 
     if (context->texture)
         SDL_DestroyTexture(context->texture);
+    for (size_t i = 0; i < SNESRECOMP_OVERLAY_MAX_LAYERS; i++) {
+        if (context->overlay_textures[i])
+            SDL_DestroyTexture(context->overlay_textures[i]);
+    }
     if (context->renderer)
         SDL_DestroyRenderer(context->renderer);
     if (context->window)
@@ -118,7 +280,8 @@ static bool sdl_present(
     SdlPresenterContext *context =
         (SdlPresenterContext *)presenter->context;
     if (!frame || !frame->pixels || frame->width <= 0 ||
-        frame->height <= 0 || frame->pitch < frame->width * 4) {
+        frame->height <= 0 || frame->pitch < frame->width * 4 ||
+        !valid_overlay(frame->overlay, frame->width, frame->height)) {
         snesrecomp_presenter_set_error(
             presenter, "invalid video frame");
         return false;
@@ -147,6 +310,8 @@ static bool sdl_present(
         return set_sdl_error(presenter, "SDL_RenderClear");
     if (!SDL_RenderTexture(context->renderer, context->texture, NULL, NULL))
         return set_sdl_error(presenter, "SDL_RenderTexture");
+    if (!render_overlay(presenter, frame->overlay))
+        return false;
     if (!SDL_RenderPresent(context->renderer))
         return set_sdl_error(presenter, "SDL_RenderPresent");
     return true;
@@ -213,6 +378,12 @@ static bool sdl_get_drawable_size(
     return true;
 }
 
+static float sdl_get_display_scale(SnesRecompPresenter *presenter) {
+    SdlPresenterContext *context =
+        (SdlPresenterContext *)presenter->context;
+    return SDL_GetWindowDisplayScale(context->window);
+}
+
 static const SnesRecompPresenterOps kSdlPresenterOps = {
     sdl_destroy,
     sdl_present,
@@ -220,6 +391,8 @@ static const SnesRecompPresenterOps kSdlPresenterOps = {
     sdl_set_window_scale,
     sdl_set_window_title,
     sdl_get_drawable_size,
+    NULL,
+    sdl_get_display_scale,
 };
 
 bool snesrecomp_presenter_sdl_create(
@@ -243,7 +416,7 @@ bool snesrecomp_presenter_sdl_create(
         snesrecomp_presenter_display_width(
             presenter, config->frame_width) * config->window_scale,
         config->frame_height * config->window_scale,
-        SDL_WINDOW_RESIZABLE);
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!context->window)
         return set_sdl_error(presenter, "SDL_CreateWindow");
 
@@ -290,7 +463,8 @@ bool snesrecomp_presenter_sdl_create(
     presenter->backend = software
         ? SNESRECOMP_PRESENT_BACKEND_SDL_SOFTWARE
         : SNESRECOMP_PRESENT_BACKEND_SDL;
-    presenter->capabilities = SNESRECOMP_PRESENT_CAP_BASIC;
+    presenter->capabilities =
+        SNESRECOMP_PRESENT_CAP_BASIC | SNESRECOMP_PRESENT_CAP_OVERLAYS;
 
     const char *renderer_name = SDL_GetRendererName(context->renderer);
     snprintf(

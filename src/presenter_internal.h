@@ -21,6 +21,10 @@ typedef struct SnesRecompPresenterOps {
         SnesRecompPresenter *presenter,
         int *width,
         int *height);
+    bool (*present_mode7_hd)(
+        SnesRecompPresenter *presenter,
+        const SnesRecompMode7HdFrame *frame);
+    float (*get_display_scale)(SnesRecompPresenter *presenter);
 } SnesRecompPresenterOps;
 
 struct SnesRecompPresenter {

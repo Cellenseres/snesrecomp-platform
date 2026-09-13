@@ -13,6 +13,7 @@ typedef struct OpenGlPresenterContext {
     SDL_Window *window;
     SDL_GLContext gl_context;
     GLuint texture;
+    GLuint overlay_textures[SNESRECOMP_OVERLAY_MAX_LAYERS];
     GLuint vertex_array;
     GLuint preset_vertex_array;
     GLuint vertex_buffer;
@@ -20,6 +21,9 @@ typedef struct OpenGlPresenterContext {
     SnesRecompPixelFormat texture_format;
     int texture_width;
     int texture_height;
+    int overlay_widths[SNESRECOMP_OVERLAY_MAX_LAYERS];
+    int overlay_heights[SNESRECOMP_OVERLAY_MAX_LAYERS];
+    bool overlay_linear[SNESRECOMP_OVERLAY_MAX_LAYERS];
     bool preserve_aspect;
     bool linear_filtering;
     const SnesRecompShaderPresetInterface *preset_interface;
@@ -540,6 +544,9 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
         glDeleteVertexArrays(1, &context->preset_vertex_array);
     if (context->texture)
         glDeleteTextures(1, &context->texture);
+    glDeleteTextures(
+        (GLsizei)SNESRECOMP_OVERLAY_MAX_LAYERS,
+        context->overlay_textures);
     if (context->gl_context)
         (void)SDL_GL_DestroyContext(context->gl_context);
     if (context->window)
@@ -548,10 +555,85 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
     presenter->context = NULL;
 }
 
+static bool upload_overlay(
+    SnesRecompPresenter *presenter,
+    const SnesRecompOverlayFrame *overlay,
+    int logical_width,
+    int logical_height) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    if (!overlay)
+        return true;
+    if (!overlay->layers || overlay->layer_count == 0 ||
+        overlay->layer_count > SNESRECOMP_OVERLAY_MAX_LAYERS ||
+        overlay->canvas_width <= 0 || overlay->canvas_height <= 0 ||
+        (overlay->space != SNESRECOMP_OVERLAY_SPACE_FRAME &&
+         overlay->space != SNESRECOMP_OVERLAY_SPACE_PRESENTATION) ||
+        (overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME &&
+         (overlay->canvas_width != logical_width ||
+          overlay->canvas_height != logical_height))) {
+        snesrecomp_presenter_set_error(presenter, "invalid overlay frame");
+        return false;
+    }
+    for (size_t i = 0; i < overlay->layer_count; i++) {
+        const SnesRecompOverlayLayer *layer = &overlay->layers[i];
+        if (!layer->pixels ||
+            layer->pixel_format != SNESRECOMP_PIXEL_FORMAT_ARGB8888 ||
+            layer->width <= 0 || layer->height <= 0 ||
+            layer->pitch < layer->width * 4 || (layer->pitch & 3) != 0 ||
+            layer->display_width <= 0 || layer->display_height <= 0) {
+            snesrecomp_presenter_set_error(
+                presenter, "invalid overlay layer");
+            return false;
+        }
+        if (!context->overlay_textures[i]) {
+            glGenTextures(1, &context->overlay_textures[i]);
+        }
+        if (!context->overlay_textures[i]) {
+            snesrecomp_presenter_set_error(
+                presenter, "OpenGL overlay texture allocation failed");
+            return false;
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, context->overlay_textures[i]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, layer->pitch / 4);
+        if (context->overlay_widths[i] != layer->width ||
+            context->overlay_heights[i] != layer->height) {
+            glTexImage2D(
+                GL_TEXTURE_2D, 0, GL_RGBA8,
+                layer->width, layer->height, 0,
+                GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, layer->pixels);
+            glTexParameteri(
+                GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(
+                GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            context->overlay_widths[i] = layer->width;
+            context->overlay_heights[i] = layer->height;
+            context->overlay_linear[i] = !layer->linear_filtering;
+        } else {
+            glTexSubImage2D(
+                GL_TEXTURE_2D, 0, 0, 0,
+                layer->width, layer->height,
+                GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, layer->pixels);
+        }
+        if (context->overlay_linear[i] != layer->linear_filtering) {
+            const GLint filter = layer->linear_filtering
+                ? GL_LINEAR : GL_NEAREST;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+            context->overlay_linear[i] = layer->linear_filtering;
+        }
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    return true;
+}
+
 static bool opengl_present_texture(
     SnesRecompPresenter *presenter, GLuint texture,
     int source_width, int source_height,
-    int logical_width, int logical_height) {
+    int logical_width, int logical_height,
+    const SnesRecompOverlayFrame *overlay) {
     OpenGlPresenterContext *context =
         (OpenGlPresenterContext *)presenter->context;
     int drawable_width = 0, drawable_height = 0;
@@ -563,6 +645,9 @@ static bool opengl_present_texture(
     }
     if (drawable_width <= 0 || drawable_height <= 0)
         return true;
+    if (!upload_overlay(
+            presenter, overlay, logical_width, logical_height))
+        return false;
 
     viewport_width = drawable_width;
     viewport_height = drawable_height;
@@ -594,6 +679,49 @@ static bool opengl_present_texture(
         glUseProgram(context->program);
         glBindVertexArray(context->vertex_array);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+    if (overlay) {
+        /* Preset renderers may finish on an intermediate target. UI always
+         * belongs to the real presentation surface. */
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const int base_x = overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME
+            ? viewport_x : 0;
+        const int base_y_top = overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME
+            ? drawable_height - viewport_y - viewport_height : 0;
+        const int base_width = overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME
+            ? viewport_width : drawable_width;
+        const int base_height = overlay->space == SNESRECOMP_OVERLAY_SPACE_FRAME
+            ? viewport_height : drawable_height;
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFuncSeparate(
+            GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+            GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(context->program);
+        glBindVertexArray(context->vertex_array);
+        for (size_t i = 0; i < overlay->layer_count; i++) {
+            const SnesRecompOverlayLayer *layer = &overlay->layers[i];
+            const int x = base_x +
+                (int)((int64_t)layer->x * base_width /
+                      overlay->canvas_width);
+            const int y_top = base_y_top +
+                (int)((int64_t)layer->y * base_height /
+                      overlay->canvas_height);
+            const int width =
+                (int)((int64_t)layer->display_width * base_width /
+                      overlay->canvas_width);
+            const int height =
+                (int)((int64_t)layer->display_height * base_height /
+                      overlay->canvas_height);
+            glViewport(x, drawable_height - y_top - height, width, height);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, context->overlay_textures[i]);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        }
+        glDisable(GL_BLEND);
     }
 
     {
@@ -659,7 +787,7 @@ static bool opengl_present(
     }
     return opengl_present_texture(
         presenter, context->texture, frame->width, frame->height,
-        frame->width, frame->height);
+        frame->width, frame->height, frame->overlay);
 }
 
 static uint8_t mode7_obj_texel(const uint16_t *vram,
@@ -1008,7 +1136,7 @@ static bool opengl_present_mode7_hd(
             return opengl_present_texture(
                 presenter, context->mode7_target, target_width,
                 target_height, (int)cap->canvas_width,
-                (int)cap->visible_height);
+                (int)cap->visible_height, frame->overlay);
         fprintf(stderr,
             "[video] HD Mode 7 self-check: map host=%dx%d nonzero=%u "
             "driver=%dx%d | window bg1=%u main_rgb=%u math=%u of %u | "
@@ -1037,7 +1165,7 @@ static bool opengl_present_mode7_hd(
 
     return opengl_present_texture(
         presenter, context->mode7_target, target_width, target_height,
-        (int)cap->canvas_width, (int)cap->visible_height);
+        (int)cap->canvas_width, (int)cap->visible_height, frame->overlay);
 }
 
 static bool opengl_set_fullscreen(
@@ -1101,6 +1229,12 @@ static bool opengl_get_drawable_size(
     return true;
 }
 
+static float opengl_get_display_scale(SnesRecompPresenter *presenter) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    return SDL_GetWindowDisplayScale(context->window);
+}
+
 static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_destroy,
     opengl_present,
@@ -1109,6 +1243,7 @@ static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_set_window_title,
     opengl_get_drawable_size,
     opengl_present_mode7_hd,
+    opengl_get_display_scale,
 };
 
 static bool set_gl_attribute(
@@ -1254,7 +1389,8 @@ bool snesrecomp_presenter_opengl_create(
     presenter->capabilities = SNESRECOMP_PRESENT_CAP_BASIC;
     presenter->capabilities |=
         SNESRECOMP_PRESENT_CAP_3D |
-        SNESRECOMP_PRESENT_CAP_HD_MODE7;
+        SNESRECOMP_PRESENT_CAP_HD_MODE7 |
+        SNESRECOMP_PRESENT_CAP_OVERLAYS;
     if (config->shader_preset_interface) {
         presenter->capabilities |=
             SNESRECOMP_PRESENT_CAP_SHADER |

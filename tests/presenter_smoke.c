@@ -72,6 +72,38 @@ int main(int argc, char **argv) {
         result = fail("pixel aspect was not applied to the drawable");
     }
 
+    uint32_t overlay_pixels[4] = {
+        0x80800000u, 0x80008000u,
+        0x80000080u, 0x80808080u,
+    };
+    SnesRecompOverlayLayer overlay_layer = {
+        .pixels = overlay_pixels,
+        .pixel_format = SNESRECOMP_PIXEL_FORMAT_ARGB8888,
+        .width = 2,
+        .height = 2,
+        .pitch = 2 * (int)sizeof(uint32_t),
+        .x = 1,
+        .y = 1,
+        .display_width = 2,
+        .display_height = 2,
+    };
+    SnesRecompOverlayFrame overlay = {
+        .layers = &overlay_layer,
+        .layer_count = 1,
+        .space = SNESRECOMP_OVERLAY_SPACE_PRESENTATION,
+        .canvas_width = drawable_width,
+        .canvas_height = drawable_height,
+    };
+    SnesRecompVideoFrame overlay_frame = frame;
+    overlay_frame.overlay = &overlay;
+    if (result == 0 &&
+        !snesrecomp_presenter_present(presenter, &overlay_frame)) {
+        result = fail(snesrecomp_presenter_last_error(presenter));
+    } else if (result == 0 &&
+               snesrecomp_presenter_display_scale(presenter) <= 0.0f) {
+        result = fail("display scale is invalid");
+    }
+
     const SnesRecompVSyncState vsync_state =
         snesrecomp_presenter_vsync_state(presenter);
     if (result == 0 &&

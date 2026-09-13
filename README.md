@@ -12,6 +12,7 @@ library takes care of presenting it.
 - SDL accelerated and software output
 - OpenGL 3.3 output
 - pixel-aspect handling, scaling, fullscreen, filtering and VSync reporting
+- DPI-aware presentation-space overlay layers, independent of game scaling
 - optional GLSL/GLSLP shader presets
 - a public native-presenter backend contract for target adapters
 - clear capability reporting and error messages
@@ -22,6 +23,12 @@ library takes care of presenting it.
 
 The public API contains no game-specific state and does not depend on generated
 recomp code. It is intended to be shared by more than one SNES recomp project.
+
+Overlay layers can use either guest-frame coordinates or presentation pixels.
+Presentation-space layers are drawn after shaders and keep their physical size
+when a game changes resolution, aspect ratio or widescreen policy. Games own
+their visual theme and submit already-rasterized premultiplied-ARGB surfaces;
+the platform only positions and composites them.
 
 ## Using it
 
