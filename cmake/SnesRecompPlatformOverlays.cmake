@@ -27,8 +27,14 @@ function(snesrecomp_platform_overlay_cpu_infra sources_var snesrecomp_root)
     set(_seed_new "")
     string(FIND "${_source}" "${_seed_old}" _seed_pos)
     if(_seed_pos EQUAL -1)
-        message(FATAL_ERROR
-            "The pinned RecompStackPush entry-S context changed.")
+        # Absent is the state this overlay produces: a core that predates the
+        # seeding, or one that has dropped it again, needs no copy.
+        if(_source MATCHES "g_cpu_entry_s.slot. *=")
+            message(FATAL_ERROR
+                "The pinned RecompStackPush entry-S context changed.")
+        endif()
+        message(STATUS "snesrecomp-platform: core does not seed entry-S")
+        return()
     endif()
     string(REPLACE "${_seed_old}" "${_seed_new}" _patched "${_source}")
 
