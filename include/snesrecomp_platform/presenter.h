@@ -112,6 +112,13 @@ typedef struct SnesRecompMode7HdFrame {
      * 128x128 Mode 7 map captured from VRAM. */
     const SnesRecompMode7MapSource *map_source;
     unsigned scale;
+
+    /* Enhancements, off by default so the pass stays pixel exact against the
+     * CPU reference. Filtering resolves four taps to colour and blends them;
+     * interpolation samples the plane between two native scanlines instead of
+     * repeating one. */
+    bool filter_bg;
+    bool interpolate_lines;
 } SnesRecompMode7HdFrame;
 
 bool snesrecomp_presenter_create(
