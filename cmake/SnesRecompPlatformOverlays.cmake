@@ -1,6 +1,16 @@
 include_guard(GLOBAL)
 
+# Cached, not set(): this file is included from one scope and used in another.
+option(SNESRECOMP_PLATFORM_LLE_DEADLINE_SEAM
+    "Drop snesrecomp's sticky LLE deadline flag so the unwind stays a coroutine switch" ON)
+
 function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
+    # OFF leaves interp_bridge.c pristine, for an A/B of the unwind policy.
+    if(DEFINED SNESRECOMP_PLATFORM_BRIDGE_OVERLAY AND
+       NOT SNESRECOMP_PLATFORM_BRIDGE_OVERLAY)
+        message(STATUS "snesrecomp-platform: bridge overlay OFF")
+        return()
+    endif()
     set(_upstream
         "${snesrecomp_root}/runner/src/snes/interp_bridge.c")
     if(NOT EXISTS "${_upstream}")
@@ -67,14 +77,8 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
     string(REPLACE "${_loop_old}" "${_loop_new}"
         _patched "${_patched}")
 
-    # A deadline unwind now leaves the bridge instead of switching the
-    # interpreted coroutine, and the bridge decides which by a flag the
-    # deadline test sets as a side effect. The yield path it replaces resumes
-    # at the unwind PC inside the same frame, with the compiled callsite's JSR
-    # frame still on the guest stack; returning instead hands that frame to
-    # nobody and the guest eventually returns through it. Drop the side effect
-    # so the flag stays clear and the coroutine switch is taken, which is the
-    # behaviour this platform's nested-LLE deadline policy above assumes.
+    # Drop the sticky flag so a deadline unwind stays a coroutine switch;
+    # returning instead abandons the callsite's JSR frame on the guest stack.
     set(_deadline_old [=[
     if (reached)
         s_lle_next_unwind_is_deadline = 1;
@@ -83,13 +87,18 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
     set(_deadline_new [=[
     return reached;
 ]=])
-    string(FIND "${_patched}" "${_deadline_old}" _deadline_pos)
-    if(_deadline_pos EQUAL -1)
-        message(FATAL_ERROR
-            "The pinned LLE deadline unwind context changed.")
+    if(SNESRECOMP_PLATFORM_LLE_DEADLINE_SEAM)
+        string(FIND "${_patched}" "${_deadline_old}" _deadline_pos)
+        if(_deadline_pos EQUAL -1)
+            message(FATAL_ERROR
+                "The pinned LLE deadline unwind context changed.")
+        endif()
+        string(REPLACE "${_deadline_old}" "${_deadline_new}"
+            _patched "${_patched}")
+    else()
+        message(STATUS
+            "snesrecomp-platform: LLE deadline seam OFF (upstream behaviour)")
     endif()
-    string(REPLACE "${_deadline_old}" "${_deadline_new}"
-        _patched "${_patched}")
 
     file(WRITE "${_overlay}" "${_patched}")
 
