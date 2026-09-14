@@ -189,8 +189,72 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
             "${recomp_ui_root}/src/common;${recomp_ui_root}/src"
     )
 
+    # The pinned UI supports widescreen but does not draw its control.
+    # Patch a build-tree copy; keep fetched sources untouched.
+    set(_imgui_upstream
+        "${recomp_ui_root}/src/common/backends/imgui/launcher_imgui.cpp")
+    set(_imgui_overlay
+        "${_generated_root}/common/backends/imgui/launcher_imgui.cpp")
+    if(NOT EXISTS "${_imgui_upstream}")
+        message(FATAL_ERROR "Missing recomp-ui launcher_imgui.cpp")
+    endif()
+    file(READ "${_imgui_upstream}" _imgui_source)
+
+    set(_legacy_widescreen_old [=[
+        row_fullscreen(m, th);
+        if (m->num_display_layouts > 0) {
+]=])
+    set(_legacy_widescreen_new [=[
+        row_fullscreen(m, th);
+        if (m->widescreen_supported) {
+            row_label_right("Widescreen", th, cb);
+            bool widescreen = m->s.widescreen != 0;
+            if (ImGui::Checkbox("##widescreen", &widescreen))
+                launcher_model_toggle_widescreen(m);
+        }
+        if (m->num_display_layouts > 0) {
+]=])
+    string(FIND "${_imgui_source}" "${_legacy_widescreen_old}"
+        _legacy_widescreen_pos)
+    if(_legacy_widescreen_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui legacy fullscreen context changed.")
+    endif()
+    string(REPLACE "${_legacy_widescreen_old}" "${_legacy_widescreen_new}"
+        _imgui_patched "${_imgui_source}")
+
+    set(_deep_widescreen_old [=[
+    row_fullscreen(m, th);
+    if (m->num_display_layouts > 0) {
+]=])
+    set(_deep_widescreen_new [=[
+    row_fullscreen(m, th);
+    if (m->widescreen_supported) {
+        row_label_right("Widescreen", th, cb);
+        bool widescreen = m->s.widescreen != 0;
+        if (ImGui::Checkbox("##widescreen", &widescreen))
+            launcher_model_toggle_widescreen(m);
+    }
+    if (m->num_display_layouts > 0) {
+]=])
+    string(FIND "${_imgui_patched}" "${_deep_widescreen_old}"
+        _deep_widescreen_pos)
+    if(_deep_widescreen_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui deep fullscreen context changed.")
+    endif()
+    string(REPLACE "${_deep_widescreen_old}" "${_deep_widescreen_new}"
+        _imgui_patched "${_imgui_patched}")
+
+    file(MAKE_DIRECTORY "${_generated_root}/common/backends/imgui")
+    file(WRITE "${_imgui_overlay}" "${_imgui_patched}")
+    set_source_files_properties("${_imgui_overlay}" PROPERTIES
+        INCLUDE_DIRECTORIES
+            "${recomp_ui_root}/src/common/backends/imgui;${recomp_ui_root}/src/common;${recomp_ui_root}/src;${recomp_ui_root}/src/third_party/imgui;${recomp_ui_root}/src/third_party/imgui/backends"
+    )
+
     get_target_property(_sources "${target}" SOURCES)
-    list(REMOVE_ITEM _sources "${_binds_upstream}")
+    list(REMOVE_ITEM _sources "${_binds_upstream}" "${_imgui_upstream}")
     set_property(TARGET "${target}" PROPERTY SOURCES "${_sources}")
-    target_sources("${target}" PRIVATE "${_binds_overlay}")
+    target_sources("${target}" PRIVATE "${_binds_overlay}" "${_imgui_overlay}")
 endfunction()
