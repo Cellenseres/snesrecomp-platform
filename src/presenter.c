@@ -116,6 +116,14 @@ bool snesrecomp_presenter_create(
         snesrecomp_presenter_set_error(
             presenter, "SDL GPU presenter is not compiled yet");
         break;
+    case SNESRECOMP_PRESENT_BACKEND_VULKAN:
+#if SNESRECOMP_PLATFORM_HAS_VULKAN
+        created = snesrecomp_presenter_vulkan_create(presenter, config);
+#else
+        snesrecomp_presenter_set_error(
+            presenter, "Vulkan presenter is not compiled in this build");
+#endif
+        break;
     case SNESRECOMP_PRESENT_BACKEND_NATIVE:
 #if SNESRECOMP_PLATFORM_HAS_NATIVE_PRESENTER
         created = snesrecomp_presenter_native_create(presenter, config);

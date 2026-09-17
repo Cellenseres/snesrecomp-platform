@@ -20,7 +20,10 @@ typedef enum SnesRecompPresentBackend {
     SNESRECOMP_PRESENT_BACKEND_SDL_SOFTWARE,
     SNESRECOMP_PRESENT_BACKEND_OPENGL,
     SNESRECOMP_PRESENT_BACKEND_SDL_GPU,
-    SNESRECOMP_PRESENT_BACKEND_NATIVE
+    SNESRECOMP_PRESENT_BACKEND_NATIVE,
+    /* Appended. The existing values travel in games' stored configuration,
+     * so they are never renumbered. */
+    SNESRECOMP_PRESENT_BACKEND_VULKAN
 } SnesRecompPresentBackend;
 
 typedef enum SnesRecompPixelFormat {
@@ -35,6 +38,20 @@ typedef enum SnesRecompPresentCapability {
     SNESRECOMP_PRESENT_CAP_3D = 1u << 4,
     SNESRECOMP_PRESENT_CAP_HD_MODE7 = 1u << 5
 } SnesRecompPresentCapability;
+
+/*
+ * Backend-neutral final-scaling policy, named after the technique rather than
+ * after any game's preset, so a backend honours it without knowing which
+ * preset asked for it. A backend that cannot do it presents as DEFAULT and
+ * says so through its backend name; this is a look, not a correctness gate.
+ */
+typedef enum SnesRecompPresentScaling {
+    /* Plain nearest or linear sampling, chosen by linear_filtering. */
+    SNESRECOMP_PRESENT_SCALING_DEFAULT = 0,
+    /* Point-sample within a texel, blend only across texel boundaries, and
+     * snap to nearest where the scale factor is an integer. */
+    SNESRECOMP_PRESENT_SCALING_SHARP_BILINEAR
+} SnesRecompPresentScaling;
 
 typedef enum SnesRecompOverlaySpace {
     /* Coordinates follow the submitted game's logical frame. */
@@ -78,6 +95,7 @@ typedef struct SnesRecompShaderPresetInterface {
 _Static_assert(sizeof(SnesRecompPresentBackend) == sizeof(int) &&
                    sizeof(SnesRecompPixelFormat) == sizeof(int) &&
                    sizeof(SnesRecompOverlaySpace) == sizeof(int) &&
+                   sizeof(SnesRecompPresentScaling) == sizeof(int) &&
                    sizeof(SnesRecompVSyncState) == sizeof(int),
                "snesrecomp_platform requires int-sized enums; build this "
                "target with -fno-short-enums.");
@@ -98,6 +116,9 @@ typedef struct SnesRecompPresentConfig {
     bool fullscreen;
     const char *shader_preset_path;
     const SnesRecompShaderPresetInterface *shader_preset_interface;
+    /* Appended, and zero keeps the previous behaviour, so a caller that
+     * memsets its config needs no change. */
+    SnesRecompPresentScaling scaling;
 } SnesRecompPresentConfig;
 
 typedef struct SnesRecompVideoFrame {

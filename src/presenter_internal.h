@@ -60,4 +60,10 @@ bool snesrecomp_presenter_opengl_create(
     const SnesRecompPresentConfig *config);
 #endif
 
+#if SNESRECOMP_PLATFORM_HAS_VULKAN
+bool snesrecomp_presenter_vulkan_create(
+    SnesRecompPresenter *presenter,
+    const SnesRecompPresentConfig *config);
+#endif
+
 #endif
