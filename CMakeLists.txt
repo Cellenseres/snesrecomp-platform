@@ -103,6 +103,39 @@ else()
         SNESRECOMP_PLATFORM_HAS_OPENGL=0)
 endif()
 
+# The native Vulkan backend. Off by default: a console or SDL-only build must
+# not acquire a Vulkan SDK dependency, and nothing outside this block refers
+# to Vulkan headers or to the loader.
+option(SNESRECOMP_PLATFORM_ENABLE_VULKAN
+    "Build the native Vulkan presentation backend" OFF)
+option(SNESRECOMP_PLATFORM_VULKAN_VALIDATION
+    "Request VK_LAYER_KHRONOS_validation at instance creation" OFF)
+
+if(SNESRECOMP_PLATFORM_ENABLE_VULKAN)
+    find_package(Vulkan REQUIRED)
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/SnesRecompPlatformVulkan.cmake")
+
+    target_sources(snesrecomp_platform PRIVATE
+        src/presenter_vulkan.c
+        src/vulkan_policy.c)
+    target_link_libraries(snesrecomp_platform PRIVATE Vulkan::Vulkan)
+    # Public, because a game gates its launcher entry and its configuration
+    # on whether this build can select the backend at all.
+    target_compile_definitions(snesrecomp_platform PUBLIC
+        SNESRECOMP_PLATFORM_HAS_VULKAN=1)
+    if(SNESRECOMP_PLATFORM_VULKAN_VALIDATION)
+        # Development only. A release build never asks for a layer.
+        target_compile_definitions(snesrecomp_platform PRIVATE
+            SNESRECOMP_PLATFORM_VULKAN_VALIDATION=1)
+    endif()
+
+    snesrecomp_platform_target_vulkan_shaders(snesrecomp_platform
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan")
+else()
+    target_compile_definitions(snesrecomp_platform PUBLIC
+        SNESRECOMP_PLATFORM_HAS_VULKAN=0)
+endif()
+
 set_target_properties(snesrecomp_platform PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
