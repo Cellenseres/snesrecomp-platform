@@ -11,6 +11,7 @@ library takes care of presenting it.
 
 - SDL accelerated and software output
 - OpenGL 3.3 output
+- native Vulkan 1.0 output, optional at build time
 - pixel-aspect handling, scaling, fullscreen, filtering and VSync reporting
 - DPI-aware presentation-space overlay layers, independent of game scaling
 - optional GLSL/GLSLP shader presets
@@ -49,6 +50,24 @@ OpenGL is optional:
 set(SNESRECOMP_PLATFORM_ENABLE_OPENGL ON)
 set(SNESRECOMP_PLATFORM_GL_CORE_DIR "path/to/gl/loader")
 ```
+
+So is Vulkan. It needs the Vulkan headers, the loader and `glslc`, which is
+why it is off by default; a console or SDL-only build acquires no Vulkan
+dependency at all:
+
+```cmake
+set(SNESRECOMP_PLATFORM_ENABLE_VULKAN ON)
+# Only when glslc is not inside $VULKAN_SDK:
+set(SNESRECOMP_PLATFORM_GLSLC "path/to/glslc")
+```
+
+The Vulkan backend uses SDL for the window, events and the WSI surface only;
+everything below the surface is Vulkan-owned. It targets Vulkan 1.0 core plus
+`VK_KHR_swapchain`, so it needs neither dynamic rendering nor descriptor
+indexing. Its shaders are tracked as GLSL 450 under `shaders/vulkan/` and are
+compiled to SPIR-V at build time and embedded; no generated binary is tracked
+and nothing is compiled at runtime. `SNESRECOMP_PLATFORM_VULKAN_VALIDATION=ON`
+requests the validation layer for development builds only.
 
 After including `snesrecomp`'s runner CMake file, shader presets can be enabled
 with:
