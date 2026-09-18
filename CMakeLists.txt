@@ -29,6 +29,7 @@ set_target_properties(snesrecomp_platform_runtime PROPERTIES
 add_library(snesrecomp_platform STATIC
     src/presenter.c
     src/presenter_sdl.c
+    src/frame_overscan.c
     src/present_timeline.c
     src/task.c
     # SNES semantics shared by reference renderers and native GPU backends.

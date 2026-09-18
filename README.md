@@ -119,6 +119,18 @@ one present per guest frame. `snesrecomp_presenter_display_millihertz()`
 reports what the backend sees; a caller may override it, which matters because
 remote sessions misreport refresh.
 
+## Bottom overscan
+
+`frame_overscan.h` extends the last kept row over the bottom rows a
+consumer set would have cropped. A 224-line frame shows the first pixel
+row of the tilemap row below the viewport, so a tilemap column the game
+has just scrolled in reveals one pixel row of content the player is not
+meant to see yet. Extending a row rather than shortening the frame
+leaves geometry, aspect and every line-indexed buffer untouched.
+
+It runs on the presentation copy, never on the render target, so the
+PPU output stays authentic and the crop is a caller policy.
+
 ## Build overlays
 
 The included CMake helpers can create reviewed build-tree copies for small
