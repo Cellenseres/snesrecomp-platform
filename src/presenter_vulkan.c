@@ -10,10 +10,13 @@
 #include "snesrecomp_platform/presenter_backend.h"
 #include "snesrecomp_platform/snes_ppu_semantic_gpu.h"
 
+#include "presenter_sdl_display.h"
+
 #include "vulkan_policy.h"
 #include "vulkan_shaders.h"
 
 #include <SDL3/SDL.h>
+
 #include <SDL3/SDL_vulkan.h>
 
 #include <limits.h>
@@ -2521,6 +2524,13 @@ static void vulkan_destroy(SnesRecompPresenter *presenter) {
     presenter->context = NULL;
 }
 
+static unsigned vulkan_get_display_millihertz(
+    SnesRecompPresenter *presenter) {
+    VulkanPresenterContext *context =
+        (VulkanPresenterContext *)presenter->context;
+    return snesrecomp_sdl_display_millihertz(context->window);
+}
+
 static const SnesRecompPresenterOps kVulkanPresenterOps = {
     vulkan_destroy,
     vulkan_present,
@@ -2530,6 +2540,7 @@ static const SnesRecompPresenterOps kVulkanPresenterOps = {
     vulkan_get_drawable_size,
     vulkan_present_mode7_hd,
     vulkan_get_display_scale,
+    vulkan_get_display_millihertz,
 };
 
 

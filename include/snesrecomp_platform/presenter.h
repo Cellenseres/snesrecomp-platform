@@ -226,6 +226,10 @@ bool snesrecomp_presenter_get_drawable_size(
 float snesrecomp_presenter_display_scale(
     SnesRecompPresenter *presenter);
 
+/* Display refresh in millihertz; zero when unknown. */
+unsigned snesrecomp_presenter_display_millihertz(
+    SnesRecompPresenter *presenter);
+
 uint32_t snesrecomp_presenter_capabilities(
     const SnesRecompPresenter *presenter);
 

@@ -1,5 +1,7 @@
 #include "snesrecomp_platform/presenter_backend.h"
 
+#include "presenter_sdl_display.h"
+
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
@@ -384,6 +386,12 @@ static float sdl_get_display_scale(SnesRecompPresenter *presenter) {
     return SDL_GetWindowDisplayScale(context->window);
 }
 
+static unsigned sdl_get_display_millihertz(
+    SnesRecompPresenter *presenter) {
+    SdlPresenterContext *context = (SdlPresenterContext *)presenter->context;
+    return snesrecomp_sdl_display_millihertz(context->window);
+}
+
 static const SnesRecompPresenterOps kSdlPresenterOps = {
     sdl_destroy,
     sdl_present,
@@ -393,6 +401,7 @@ static const SnesRecompPresenterOps kSdlPresenterOps = {
     sdl_get_drawable_size,
     NULL,
     sdl_get_display_scale,
+    sdl_get_display_millihertz,
 };
 
 bool snesrecomp_presenter_sdl_create(

@@ -182,6 +182,14 @@ bool snesrecomp_presenter_present(
     return presenter->ops->present(presenter, frame);
 }
 
+unsigned snesrecomp_presenter_display_millihertz(
+    SnesRecompPresenter *presenter) {
+    if (!presenter || !presenter->ops ||
+        !presenter->ops->get_display_millihertz)
+        return 0u;
+    return presenter->ops->get_display_millihertz(presenter);
+}
+
 uint32_t snesrecomp_presenter_mode7_scales(
     const SnesRecompPresenter *presenter) {
     if (!presenter ||

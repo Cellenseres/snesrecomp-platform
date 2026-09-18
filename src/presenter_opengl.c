@@ -1,6 +1,8 @@
 #include "snesrecomp_platform/presenter_backend.h"
 #include "snesrecomp_platform/snes_ppu_semantic_gpu.h"
 
+#include "presenter_sdl_display.h"
+
 #include "gl_core_3_1.h"
 #include <SDL3/SDL.h>
 
@@ -1250,6 +1252,13 @@ static float opengl_get_display_scale(SnesRecompPresenter *presenter) {
     return SDL_GetWindowDisplayScale(context->window);
 }
 
+static unsigned opengl_get_display_millihertz(
+    SnesRecompPresenter *presenter) {
+    OpenGlPresenterContext *context =
+        (OpenGlPresenterContext *)presenter->context;
+    return snesrecomp_sdl_display_millihertz(context->window);
+}
+
 static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_destroy,
     opengl_present,
@@ -1259,6 +1268,7 @@ static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_get_drawable_size,
     opengl_present_mode7_hd,
     opengl_get_display_scale,
+    opengl_get_display_millihertz,
 };
 
 static bool set_gl_attribute(
