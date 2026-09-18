@@ -173,6 +173,8 @@ typedef struct SnesRecompMode7HdFrame {
     /* Optional full logical tile-number plane. NULL preserves the native
      * 128x128 Mode 7 map captured from VRAM. */
     const SnesRecompMode7MapSource *map_source;
+    /* Internal rendering scale. An unadvertised one is refused, never
+     * quietly reduced. */
     unsigned scale;
 
     /* Enhancements, off by default so the pass stays pixel exact against the
@@ -226,6 +228,15 @@ float snesrecomp_presenter_display_scale(
 
 uint32_t snesrecomp_presenter_capabilities(
     const SnesRecompPresenter *presenter);
+
+/* Internal Mode 7 scales this presenter can run, as a mask of 1u << scale;
+ * zero when it has no semantic Mode 7 path. */
+uint32_t snesrecomp_presenter_mode7_scales(
+    const SnesRecompPresenter *presenter);
+
+bool snesrecomp_presenter_mode7_scale_supported(
+    const SnesRecompPresenter *presenter,
+    unsigned scale);
 
 SnesRecompPresentBackend snesrecomp_presenter_backend(
     const SnesRecompPresenter *presenter);

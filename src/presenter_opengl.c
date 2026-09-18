@@ -49,6 +49,8 @@ typedef struct OpenGlPresenterContext {
     uint8_t *mode7_window_pixels;
     size_t mode7_window_capacity;
     unsigned mode7_self_checks;
+    /* Largest 2D texture this driver will allocate. */
+    unsigned max_texture_dim;
 } OpenGlPresenterContext;
 
 static bool set_sdl_error(
@@ -267,10 +269,11 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
         "  float bg_index = 0.0;\n"
         "  vec3 bg_rgb5 = vec3(0.0);\n"
         "  if (in_bg && bg_window_visible && (enables & 1) != 0) {\n"
+        "    /* Fragment centre to integer column, then to native. */\n"
         "    float linef = line_lerp > 0.5\n"
-        "        ? (gl_FragCoord.y + 0.5) / hd_scale - 0.5 : float(line);\n"
+        "        ? (gl_FragCoord.y - 0.5) / hd_scale : float(line);\n"
         "    vec4 affine = affine_row(linef);\n"
-        "    float native_x = (local_hd_x + 0.5) / hd_scale - 0.5;\n"
+        "    float native_x = (local_hd_x - 0.5) / hd_scale;\n"
         "    vec2 limit = map_fixed_wrap / 256.0;\n"
         "    vec2 texel = (affine.xy + affine.zw * native_x) / 256.0;\n"
         "    bg_index = map_index(wrap_texel(texel, limit));\n"
@@ -971,16 +974,28 @@ static bool opengl_present_mode7_hd(
     int target_width, target_height;
     bool wants_obj = false;
 
-    if (!frame || !(cap = frame->capture) || frame->scale != 2u ||
+    if (!frame || !(cap = frame->capture) || frame->scale < 1u ||
+        frame->scale > SNESRECOMP_MODE7_MAX_SCALE ||
         !frame->lines || frame->line_count < cap->visible_height ||
         (frame->map_source &&
          !snesrecomp_ppu_mode7_map_source_valid(frame->map_source)) ||
         snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
         cap->visible_height > SNES_PPU_MAX_BANDS ||
-        cap->canvas_width > INT_MAX / 2 ||
-        cap->visible_height > INT_MAX / 2) {
+        cap->canvas_width > INT_MAX / frame->scale ||
+        cap->visible_height > INT_MAX / frame->scale) {
         snesrecomp_presenter_set_error(
             presenter, "unsupported HD Mode 7 frame");
+        return false;
+    }
+    /* A widened canvas can outgrow what was advertised at create. */
+    if (!(snesrecomp_ppu_mode7_scale_mask(
+              cap->canvas_width, cap->visible_height,
+              context->max_texture_dim, 1u) & (1u << frame->scale))) {
+        snesrecomp_presenter_set_error(
+            presenter,
+            "HD Mode 7 %ux needs a %ux%u texture; this driver allows %u",
+            frame->scale, cap->canvas_width * frame->scale,
+            cap->visible_height * frame->scale, context->max_texture_dim);
         return false;
     }
     for (unsigned bi = 0; bi < cap->band_count; bi++)
@@ -998,8 +1013,8 @@ static bool opengl_present_mode7_hd(
         !build_mode7_window_plane(presenter, frame, semantic_lines))
         return false;
 
-    target_width = (int)cap->canvas_width * 2;
-    target_height = (int)cap->visible_height * 2;
+    target_width = (int)(cap->canvas_width * frame->scale);
+    target_height = (int)(cap->visible_height * frame->scale);
     if (!allocate_mode7_target(presenter, target_width, target_height) ||
         !snesrecomp_ppu_mode7_unpack_vram(cap->vram,
                                           frame->map_source ? NULL : map_tex,
@@ -1079,7 +1094,7 @@ static bool opengl_present_mode7_hd(
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glUseProgram(context->mode7_program);
     glUniform1f(glGetUniformLocation(context->mode7_program, "hd_scale"),
-                2.0f);
+                (float)frame->scale);
     glUniform1f(glGetUniformLocation(context->mode7_program, "bg_filter"),
                 frame->filter_bg ? 1.0f : 0.0f);
     glUniform1f(glGetUniformLocation(context->mode7_program, "line_lerp"),
@@ -1391,6 +1406,15 @@ bool snesrecomp_presenter_opengl_create(
         SNESRECOMP_PRESENT_CAP_3D |
         SNESRECOMP_PRESENT_CAP_HD_MODE7 |
         SNESRECOMP_PRESENT_CAP_OVERLAYS;
+    {
+        GLint max_texture = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture);
+        /* An empty mask beats failing at the first Mode 7 scene. */
+        context->max_texture_dim = max_texture > 0 ? (unsigned)max_texture : 0u;
+        presenter->mode7_scales = snesrecomp_ppu_mode7_scale_mask(
+            (unsigned)config->frame_width, (unsigned)config->frame_height,
+            context->max_texture_dim, 1u);
+    }
     if (config->shader_preset_interface) {
         presenter->capabilities |=
             SNESRECOMP_PRESENT_CAP_SHADER |

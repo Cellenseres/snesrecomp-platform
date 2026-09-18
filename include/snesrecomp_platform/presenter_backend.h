@@ -42,6 +42,9 @@ struct SnesRecompPresenter {
     SnesRecompVSyncState vsync_state;
     char backend_name[64];
     char last_error[256];
+    /* Mask of 1u << scale. Appended so existing offsets do not move; zero
+     * keeps the earlier 2x-only contract. */
+    uint32_t mode7_scales;
 };
 
 int snesrecomp_presenter_display_width(

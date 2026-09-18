@@ -2127,16 +2127,31 @@ static bool vulkan_present_mode7_hd(
     uint32_t image_index = 0;
     unsigned i;
 
-    if (!hd || !(cap = hd->capture) || hd->scale != 2u || !hd->lines ||
+    if (!hd || !(cap = hd->capture) || hd->scale < 1u ||
+        hd->scale > SNESRECOMP_MODE7_MAX_SCALE || !hd->lines ||
         hd->line_count < cap->visible_height ||
         (hd->map_source &&
          !snesrecomp_ppu_mode7_map_source_valid(hd->map_source)) ||
         snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
         cap->visible_height > SNES_PPU_MAX_BANDS ||
-        cap->canvas_width > INT_MAX / 2 ||
-        cap->visible_height > INT_MAX / 2) {
+        cap->canvas_width > INT_MAX / hd->scale ||
+        cap->visible_height > INT_MAX / hd->scale) {
         snesrecomp_presenter_set_error(
             presenter, "unsupported HD Mode 7 frame");
+        return false;
+    }
+    /* A widened canvas can outgrow what was advertised at create. */
+    if (!(snesrecomp_ppu_mode7_scale_mask(
+              cap->canvas_width, cap->visible_height,
+              context->device_properties.limits.maxImageDimension2D,
+              sharp_bilinear_active(context) ? 2u : 1u) &
+          (1u << hd->scale))) {
+        snesrecomp_presenter_set_error(
+            presenter,
+            "HD Mode 7 %ux needs a %ux%u image; this device allows %u",
+            hd->scale, cap->canvas_width * hd->scale,
+            cap->visible_height * hd->scale,
+            context->device_properties.limits.maxImageDimension2D);
         return false;
     }
     for (i = 0; i < cap->band_count; i++) {
@@ -2241,8 +2256,8 @@ static bool vulkan_present_mode7_hd(
     uploads[7].bytes_per_pixel = 4u;
     uploads[7].pixels = semantic_lines;
 
-    target_width = (uint32_t)cap->canvas_width * 2u;
-    target_height = (uint32_t)cap->visible_height * 2u;
+    target_width = (uint32_t)cap->canvas_width * hd->scale;
+    target_height = (uint32_t)cap->visible_height * hd->scale;
 
     if (!frame_begin(presenter, &frame, &skipped))
         return false;
@@ -2332,7 +2347,7 @@ static bool vulkan_present_mode7_hd(
 
     push.map_fixed_wrap[0] = (float)map_width * 8.0f * 256.0f;
     push.map_fixed_wrap[1] = (float)map_height * 8.0f * 256.0f;
-    push.hd_scale = 2.0f;
+    push.hd_scale = (float)hd->scale;
     push.canvas_extra = (float)cap->canvas_extra;
     push.native_height = (float)cap->visible_height;
     push.bg_filter = hd->filter_bg ? 1.0f : 0.0f;
@@ -2911,6 +2926,11 @@ bool snesrecomp_presenter_vulkan_create(
         SNESRECOMP_PRESENT_CAP_BASIC |
         SNESRECOMP_PRESENT_CAP_OVERLAYS |
         SNESRECOMP_PRESENT_CAP_HD_MODE7;
+    /* Sharp-bilinear prescales the target once more before display. */
+    presenter->mode7_scales = snesrecomp_ppu_mode7_scale_mask(
+        (unsigned)config->frame_width, (unsigned)config->frame_height,
+        context->device_properties.limits.maxImageDimension2D,
+        sharp_bilinear_active(context) ? 2u : 1u);
 
     snprintf(
         presenter->backend_name,

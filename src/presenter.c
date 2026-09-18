@@ -182,6 +182,24 @@ bool snesrecomp_presenter_present(
     return presenter->ops->present(presenter, frame);
 }
 
+uint32_t snesrecomp_presenter_mode7_scales(
+    const SnesRecompPresenter *presenter) {
+    if (!presenter ||
+        !(presenter->capabilities & SNESRECOMP_PRESENT_CAP_HD_MODE7))
+        return 0u;
+    /* Backends predating the mask were verified at 2x alone. */
+    return presenter->mode7_scales ? presenter->mode7_scales : 1u << 2u;
+}
+
+bool snesrecomp_presenter_mode7_scale_supported(
+    const SnesRecompPresenter *presenter,
+    unsigned scale) {
+    if (scale == 0u || scale >= 32u)
+        return false;
+    return (snesrecomp_presenter_mode7_scales(presenter) &
+            (1u << scale)) != 0u;
+}
+
 bool snesrecomp_presenter_present_mode7_hd(
     SnesRecompPresenter *presenter,
     const SnesRecompMode7HdFrame *frame) {
@@ -189,6 +207,16 @@ bool snesrecomp_presenter_present_mode7_hd(
         !presenter->ops->present_mode7_hd ||
         !(presenter->capabilities & SNESRECOMP_PRESENT_CAP_HD_MODE7))
         return false;
+    /* Refuse an unadvertised scale; the caller keeps its own frame. */
+    if (!frame || !snesrecomp_presenter_mode7_scale_supported(
+                      presenter, frame->scale)) {
+        snesrecomp_presenter_set_error(
+            presenter, "HD Mode 7 scale %ux is not available on %s",
+            frame ? frame->scale : 0u,
+            presenter->backend_name[0] ? presenter->backend_name
+                                       : "this backend");
+        return false;
+    }
     return presenter->ops->present_mode7_hd(presenter, frame);
 }
 

@@ -87,6 +87,22 @@ tests.
 Mode 7 follows the same boundary: `snes_ppu_mode7.h` compiles the affine state
 on any host, and a backend consumes it without reinterpreting PPU registers.
 
+### HD Mode 7 scales
+
+`SnesRecompMode7HdFrame.scale` rasterises the same affine geometry at 1x
+through `SNESRECOMP_MODE7_MAX_SCALE`. It changes how finely the plane is
+sampled, not where: subcolumn k of native pixel n samples n + k/scale, so
+subcolumn zero stays on the coordinate the hardware samples. Filtering is
+separate; `filter_bg` remains off so the pass is pixel exact against the CPU
+reference.
+
+The cost is memory. The Mode 7 target is `canvas_width * scale` by
+`visible_height * scale`, and a backend that prescales it again before display
+needs twice that. `snesrecomp_presenter_mode7_scales()` reports the mask of
+scales a presenter can allocate, so a game offers only those; anything outside
+it is refused and the caller keeps its authentic frame.
+`snesrecomp_ppu_mode7_scale_mask()` is the portable policy behind the mask.
+
 ## Build overlays
 
 The included CMake helpers can create reviewed build-tree copies for small

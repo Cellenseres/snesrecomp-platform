@@ -511,10 +511,13 @@ static bool RenderReferencePlanes(
     unsigned band_index = 0;
     bool wants_obj = false;
 
-    if (!pixels || !lines || scale < 1u || scale > 4u ||
+    if (!pixels || !lines || scale < 1u ||
+        scale > SNESRECOMP_MODE7_MAX_SCALE ||
         (map_source && !snesrecomp_ppu_mode7_map_source_valid(map_source)) ||
         snesrecomp_ppu_mode7_supports(cap) != SNES_PPU_SUPPORTED ||
-        line_count < cap->visible_height)
+        line_count < cap->visible_height ||
+        cap->canvas_width > SIZE_MAX / scale ||
+        cap->visible_height > SIZE_MAX / scale)
         return false;
     output_width = (size_t)cap->canvas_width * scale;
     if (pitch < output_width ||
@@ -604,15 +607,13 @@ static bool RenderReferencePlanes(
                         -(int)band->bg[0].margin_left * (int)scale &&
                     local_hx <
                         (256 + (int)band->bg[0].margin_right) * (int)scale) {
-                    const int64_t numerator =
-                        (int64_t)2 * (local_hx + 1) - (int64_t)scale;
-                    const int64_t denominator = (int64_t)2 * scale;
+                    /* Hardware samples screen X at start + step*X. */
                     const int64_t wx = (int64_t)lines[y].start_x +
-                        FloorDiv64((int64_t)lines[y].step_x * numerator,
-                                   denominator);
+                        FloorDiv64((int64_t)lines[y].step_x * local_hx,
+                                   (int64_t)scale);
                     const int64_t wy = (int64_t)lines[y].start_y +
-                        FloorDiv64((int64_t)lines[y].step_y * numerator,
-                                   denominator);
+                        FloorDiv64((int64_t)lines[y].step_y * local_hx,
+                                   (int64_t)scale);
                     bg = Mode7Texel(cap->vram, map_source, wx, wy);
                 }
                 obj_index = obj_plane[mask_offset * 2u];
@@ -695,7 +696,7 @@ bool snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
     bool rendered = false;
 
     if (!pixels || !cap || !cap->canvas_width || !cap->visible_height ||
-        scale < 1u || scale > 4u ||
+        scale < 1u || scale > SNESRECOMP_MODE7_MAX_SCALE ||
         cap->canvas_width > SIZE_MAX / scale ||
         cap->visible_height > SIZE_MAX / scale)
         return false;
@@ -807,4 +808,23 @@ bool snesrecomp_ppu_mode7_render_reference(
     size_t pitch) {
     return snesrecomp_ppu_mode7_render_reference_with_map(
         cap, lines, line_count, obj, NULL, scale, pixels, pitch);
+}
+
+uint32_t snesrecomp_ppu_mode7_scale_mask(unsigned canvas_width,
+                                         unsigned visible_height,
+                                         unsigned max_texture_dim,
+                                         unsigned post_scale) {
+    uint32_t mask = 0u;
+
+    if (!canvas_width || !visible_height || !max_texture_dim || !post_scale)
+        return 0u;
+    /* Monotone in scale, so the first misfit ends the range. */
+    for (unsigned scale = 1u; scale <= SNESRECOMP_MODE7_MAX_SCALE; scale++) {
+        const unsigned factor = scale * post_scale;
+        if (canvas_width > max_texture_dim / factor ||
+            visible_height > max_texture_dim / factor)
+            break;
+        mask |= 1u << scale;
+    }
+    return mask;
 }

@@ -44,7 +44,17 @@ enum {
     SNESRECOMP_MODE7_COORD_MASK = 0x3ffffu,
     SNESRECOMP_MODE7_TEXTURE_DIM = 128u,
     SNESRECOMP_MODE7_TEXTURE_TEXELS = 128u * 128u,
+
+    /* Every integer up to here is valid geometry. */
+    SNESRECOMP_MODE7_MAX_SCALE = 8u,
 };
+
+/* Scales whose target fits max_texture_dim, as a mask of 1u << scale.
+ * `post_scale` is any extra factor the backend applies before display. */
+uint32_t snesrecomp_ppu_mode7_scale_mask(unsigned canvas_width,
+                                         unsigned visible_height,
+                                         unsigned max_texture_dim,
+                                         unsigned post_scale);
 
 /* Exact first production subset:
  *   - Mode 7 BG1 on the main screen, optionally with captured OBJ
@@ -122,12 +132,12 @@ bool snesrecomp_ppu_mode7_unpack_vram(const uint16_t *vram,
 
 /* Slow, deterministic layer-resolved palette-index reference for backend
  * validation. Colour math is intentionally not representable in this U8
- * result; use the ARGB8888 reference below for finished pixels. It follows
- * the HD fragment-centre convention used by the OpenGL path and chooses the
- * matching native raster line for every subrow. `pixels` is a
+ * result; use the ARGB8888 reference below for finished pixels. Subcolumn k
+ * of native pixel n samples n + k/scale, as the GPU backends do, and every
+ * subrow takes its matching native raster line. `pixels` is a
  * canvas_width*scale by visible_height*scale U8 buffer; pitch is in bytes.
  * Negative and greater-than-255 screen X values inside each band's declared
- * margins use the same affine pixel-centre rules as the native viewport.
+ * margins use the same affine rules as the native viewport.
  * Coordinates use the same 18-bit wrap rules as the native viewport. Forced
  * blank is palette index zero. */
 bool snesrecomp_ppu_mode7_render_reference(

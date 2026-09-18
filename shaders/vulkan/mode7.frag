@@ -103,10 +103,11 @@ void main(void) {
     float bg_index = 0.0;
     vec3 bg_rgb5 = vec3(0.0);
     if (in_bg && bg_window_visible && (enables & 1) != 0) {
+        /* Fragment centre to integer column, then to native. */
         float linef = pc.line_lerp > 0.5
-            ? (gl_FragCoord.y + 0.5) / pc.hd_scale - 0.5 : float(line);
+            ? (gl_FragCoord.y - 0.5) / pc.hd_scale : float(line);
         vec4 affine = affine_row(linef);
-        float native_x = (local_hd_x + 0.5) / pc.hd_scale - 0.5;
+        float native_x = (local_hd_x - 0.5) / pc.hd_scale;
         vec2 limit = pc.map_fixed_wrap / 256.0;
         vec2 texel = (affine.xy + affine.zw * native_x) / 256.0;
         bg_index = map_index(wrap_texel(texel, limit));
