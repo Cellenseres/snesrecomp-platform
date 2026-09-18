@@ -103,6 +103,22 @@ scales a presenter can allocate, so a game offers only those; anything outside
 it is refused and the caller keeps its authentic frame.
 `snesrecomp_ppu_mode7_scale_mask()` is the portable policy behind the mask.
 
+## Presentation timeline
+
+`present_timeline.h` separates when the guest advances from when the host
+presents, so a 60 Hz game can be shown at 144 Hz without its simulation
+speeding up. The guest keeps an exact rational cadence that cannot drift; the
+present clock free-runs at the display rate, and intermediate presents carry
+no guest work at all. `alpha` reports where a present falls between two guest
+frames, which motion interpolation will read later.
+
+It is arithmetic over a monotonic microsecond clock, with no window and no
+backend, so pacing is testable without a display. A display that is not
+meaningfully faster than the guest, or one whose refresh cannot be read, keeps
+one present per guest frame. `snesrecomp_presenter_display_millihertz()`
+reports what the backend sees; a caller may override it, which matters because
+remote sessions misreport refresh.
+
 ## Build overlays
 
 The included CMake helpers can create reviewed build-tree copies for small
