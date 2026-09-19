@@ -36,6 +36,7 @@ add_library(snesrecomp_platform STATIC
     # These sources contain no console SDK or game-specific code.
     src/snes_ppu_capture.c
     src/snes_bg_continuity.c
+    src/snes_obj_continuity.c
     src/snes_ppu_mode7.c
     src/snes_tiles.c
     src/snes_bg_upload.c
