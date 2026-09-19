@@ -162,6 +162,7 @@ void snesrecomp_present_timeline_step(SnesRecompPresentTimeline *timeline,
     if (!timeline || !timeline->guest_period_us) {
         step.run_guest = true;
         step.present = true;
+        step.carries_guest_frame = true;
         *out_step = step;
         return;
     }
@@ -187,6 +188,7 @@ void snesrecomp_present_timeline_step(SnesRecompPresentTimeline *timeline,
         step.present = true;
     }
 
+    step.carries_guest_frame = timeline->guest_pending;
     step.alpha = AlphaAt(timeline, now_us);
     if (!step.run_guest && !step.present)
         step.sleep_us = SleepUntilNext(timeline, now_us);

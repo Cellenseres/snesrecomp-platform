@@ -47,6 +47,9 @@ typedef struct SnesRecompPresentStep {
     bool run_guest;
     /* Submit the composed picture. */
     bool present;
+    /* This present would show a guest frame nothing has shown yet.
+       A caller that cannot repeat a frame must present when set. */
+    bool carries_guest_frame;
     /* Where this present falls between two guest frames. */
     float alpha;
     /* Idle at most this long before stepping again. */
