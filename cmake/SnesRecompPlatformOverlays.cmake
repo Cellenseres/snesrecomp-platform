@@ -246,6 +246,106 @@ function(snesrecomp_platform_target_launcher_overlays target recomp_ui_root)
     string(REPLACE "${_deep_widescreen_old}" "${_deep_widescreen_new}"
         _imgui_patched "${_imgui_patched}")
 
+    # A cycling button hides its other choices and makes the last one cost
+    # four clicks. The UI already has settings_combo_row for exactly this.
+    set(_legacy_filter_old [=[
+        if (m->has_sharp_filter) {
+            row_label_right("Scaling filter", th, px(180));
+            if (ImGui::Button(ui_text(launcher_model_scaling_filter_label(m)),
+                              ImVec2(px(180), px(30))))
+                launcher_model_cycle_scaling_filter(m);
+        } else {
+]=])
+    set(_legacy_filter_new [=[
+        if (m->has_sharp_filter) {
+            static const SettingsChoice kScalingFilterChoices[] = {
+                {0, "Nearest"}, {1, "Linear"}, {2, "Sharp fractional"}
+            };
+            const int cur = m->s.sharp_filter ? 2
+                          : (m->s.linear_filter ? 1 : 0);
+            /* This panel gives the control 180px; the shared helper is
+               fixed at SETTINGS_CTRL_W and clips "Sharp fractional". */
+            int picked = cur;
+            row_label_right("Scaling filter", th, px(180));
+            ImGui::SetNextItemWidth(px(180));
+            if (ImGui::BeginCombo("##scaling_filter",
+                    ui_text(kScalingFilterChoices[cur].label))) {
+                for (int i = 0; i < 3; ++i)
+                    if (ImGui::Selectable(ui_text(kScalingFilterChoices[i].label),
+                                          i == cur))
+                        picked = i;
+                ImGui::EndCombo();
+            }
+            if (picked != cur) {
+                m->s.sharp_filter = picked == 2 ? 1 : 0;
+                m->s.linear_filter = picked == 1 ? 1 : 0;
+            }
+        } else {
+]=])
+    string(FIND "${_imgui_patched}" "${_legacy_filter_old}" _legacy_filter_pos)
+    if(_legacy_filter_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui legacy scaling filter context changed.")
+    endif()
+    string(REPLACE "${_legacy_filter_old}" "${_legacy_filter_new}"
+        _imgui_patched "${_imgui_patched}")
+
+    set(_deep_filter_old [=[
+    if (m->has_sharp_filter) {
+        row_label_right("Scaling filter", th, px(SETTINGS_CTRL_W));
+        if (ImGui::Button(ui_text(launcher_model_scaling_filter_label(m)),
+                          ImVec2(px(SETTINGS_CTRL_W), px(30))))
+            launcher_model_cycle_scaling_filter(m);
+    } else if (m->has_texture_filter) {
+]=])
+    set(_deep_filter_new [=[
+    if (m->has_sharp_filter) {
+        static const SettingsChoice kScalingFilterChoices[] = {
+            {0, "Nearest"}, {1, "Linear"}, {2, "Sharp fractional"}
+        };
+        const int cur = m->s.sharp_filter ? 2 : (m->s.linear_filter ? 1 : 0);
+        const int picked = settings_combo_row("Scaling filter", th,
+            "##scaling_filter", kScalingFilterChoices, 3, cur);
+        if (picked != cur) {
+            m->s.sharp_filter = picked == 2 ? 1 : 0;
+            m->s.linear_filter = picked == 1 ? 1 : 0;
+        }
+    } else if (m->has_texture_filter) {
+]=])
+    string(FIND "${_imgui_patched}" "${_deep_filter_old}" _deep_filter_pos)
+    if(_deep_filter_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui deep scaling filter context changed.")
+    endif()
+    string(REPLACE "${_deep_filter_old}" "${_deep_filter_new}"
+        _imgui_patched "${_imgui_patched}")
+
+    set(_interp_fps_old [=[
+        if (m->s.frame_interp) {
+            row_label_right("Presentation target", th, px(SETTINGS_CTRL_W));
+            if (ImGui::Button(ui_text(launcher_model_interp_fps_label(m)), ImVec2(px(SETTINGS_CTRL_W), px(30))))
+                launcher_model_cycle_interp_fps(m);
+        }
+]=])
+    set(_interp_fps_new [=[
+        if (m->s.frame_interp) {
+            static const SettingsChoice kInterpFpsChoices[] = {
+                {0, "Display refresh"}, {90, "90 fps"}, {120, "120 fps"},
+                {144, "144 fps"}, {165, "165 fps"}, {240, "240 fps"}
+            };
+            m->s.frame_interp_fps = settings_combo_row("Presentation target",
+                th, "##interp_fps", kInterpFpsChoices, 6,
+                m->s.frame_interp_fps);
+        }
+]=])
+    string(FIND "${_imgui_patched}" "${_interp_fps_old}" _interp_fps_pos)
+    if(_interp_fps_pos EQUAL -1)
+        message(FATAL_ERROR
+            "The pinned recomp-ui presentation target context changed.")
+    endif()
+    string(REPLACE "${_interp_fps_old}" "${_interp_fps_new}"
+        _imgui_patched "${_imgui_patched}")
+
     file(MAKE_DIRECTORY "${_generated_root}/common/backends/imgui")
     file(WRITE "${_imgui_overlay}" "${_imgui_patched}")
     set_source_files_properties("${_imgui_overlay}" PROPERTIES
