@@ -13,6 +13,7 @@ add_library(snesrecomp_platform_runtime STATIC
     src/sha1.c
     src/rom_verify.c
     src/msu_pack.c
+    src/margin_pack.c
 )
 add_library(snesrecomp::runtime ALIAS snesrecomp_platform_runtime)
 target_compile_features(snesrecomp_platform_runtime PUBLIC c_std_11)
@@ -221,6 +222,13 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
     add_test(NAME snesrecomp_platform_rom_verify_smoke
         COMMAND snesrecomp_platform_rom_verify_smoke)
 
+    add_executable(snesrecomp_platform_margin_pack_smoke
+        tests/margin_pack_smoke.c)
+    target_link_libraries(snesrecomp_platform_margin_pack_smoke PRIVATE
+        snesrecomp::runtime)
+    add_test(NAME snesrecomp_platform_margin_pack_smoke
+        COMMAND snesrecomp_platform_margin_pack_smoke)
+
     add_executable(snesrecomp_platform_smoke
         tests/presenter_smoke.c)
     target_link_libraries(snesrecomp_platform_smoke PRIVATE
@@ -235,6 +243,42 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
     add_test(NAME snesrecomp_platform_smoke
         COMMAND snesrecomp_platform_smoke)
 
+    # Measures presentation pacing only; not registered as a test because it
+    # reports timings rather than passing or failing.
+    add_executable(snesrecomp_platform_presenter_bench
+        tests/presenter_bench.c)
+    target_link_libraries(snesrecomp_platform_presenter_bench PRIVATE
+        snesrecomp::platform
+        SDL3::SDL3)
+    if(WIN32 AND TARGET SDL3::SDL3-shared)
+        add_custom_command(TARGET snesrecomp_platform_presenter_bench
+            POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:SDL3::SDL3-shared>"
+                "$<TARGET_FILE_DIR:snesrecomp_platform_presenter_bench>")
+    endif()
+
+    add_executable(snesrecomp_platform_present_timeline_smoke
+        tests/present_timeline_smoke.c)
+    target_link_libraries(snesrecomp_platform_present_timeline_smoke
+        PRIVATE snesrecomp::platform)
+    add_test(NAME snesrecomp_platform_present_timeline_smoke
+        COMMAND snesrecomp_platform_present_timeline_smoke)
+
+    add_executable(snesrecomp_platform_obj_continuity_smoke
+        tests/snes_obj_continuity_smoke.c)
+    target_link_libraries(snesrecomp_platform_obj_continuity_smoke
+        PRIVATE snesrecomp::platform)
+    add_test(NAME snesrecomp_platform_obj_continuity_smoke
+        COMMAND snesrecomp_platform_obj_continuity_smoke)
+
+    add_executable(snesrecomp_platform_bg_continuity_smoke
+        tests/snes_bg_continuity_smoke.c)
+    target_link_libraries(snesrecomp_platform_bg_continuity_smoke
+        PRIVATE snesrecomp::platform)
+    add_test(NAME snesrecomp_platform_bg_continuity_smoke
+        COMMAND snesrecomp_platform_bg_continuity_smoke)
+
     add_executable(snesrecomp_platform_mode7_smoke
         tests/snes_ppu_mode7_smoke.c)
     target_link_libraries(snesrecomp_platform_mode7_smoke PRIVATE
@@ -247,6 +291,27 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
         add_test(NAME snesrecomp_platform_opengl_smoke
             COMMAND snesrecomp_platform_smoke opengl)
         set_tests_properties(snesrecomp_platform_opengl_smoke PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endif()
+    if(SNESRECOMP_PLATFORM_ENABLE_VULKAN)
+        # Pure selection policy: no instance, no device, no window.
+        # vulkan_policy.c already lives in snesrecomp::platform; compiling it
+        # again here would define the same symbols twice.
+        add_executable(snesrecomp_platform_vulkan_policy_smoke
+            tests/vulkan_policy_smoke.c)
+        target_include_directories(
+            snesrecomp_platform_vulkan_policy_smoke PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(snesrecomp_platform_vulkan_policy_smoke PRIVATE
+            snesrecomp::platform
+            Vulkan::Vulkan)
+        add_test(NAME snesrecomp_platform_vulkan_policy_smoke
+            COMMAND snesrecomp_platform_vulkan_policy_smoke)
+
+        # Needs a real device, so it reports 77 where none is usable.
+        add_test(NAME snesrecomp_platform_vulkan_smoke
+            COMMAND snesrecomp_platform_smoke vulkan)
+        set_tests_properties(snesrecomp_platform_vulkan_smoke PROPERTIES
             SKIP_RETURN_CODE 77)
     endif()
 endif()
