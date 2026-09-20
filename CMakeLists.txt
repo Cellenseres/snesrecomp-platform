@@ -13,6 +13,7 @@ add_library(snesrecomp_platform_runtime STATIC
     src/sha1.c
     src/rom_verify.c
     src/msu_pack.c
+    src/margin_pack.c
 )
 add_library(snesrecomp::runtime ALIAS snesrecomp_platform_runtime)
 target_compile_features(snesrecomp_platform_runtime PUBLIC c_std_11)
