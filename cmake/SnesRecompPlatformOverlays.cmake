@@ -1,9 +1,5 @@
 include_guard(GLOBAL)
 
-# Cached, not set(): this file is included from one scope and used in another.
-option(SNESRECOMP_PLATFORM_LLE_DEADLINE_SEAM
-    "Drop snesrecomp's sticky LLE deadline flag so the unwind stays a coroutine switch" ON)
-
 # An hle_func stub has no prologue to overwrite the seeded entry-S, so the
 # ancestor scan matches it and the unwind stops one frame short.
 option(SNESRECOMP_PLATFORM_HLE_ENTRY_S_SEAM
@@ -113,9 +109,13 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
                 yield_pc != 0, stop_on_rti, s_lle_sched_depth,
                 s_interp_bounce_owner_depth, s_lle_master_deadline,
                 cpu->master_cycles)) {
+            /* The deadline belongs to the host. The owning bounce must
+             * return so it can re-arm the time bound. */
             s_lle_unwind_active = 1;
             s_lle_unwind_pc24 = pc_before & 0xFFFFFFu;
             s_lle_unwind_owner_depth = s_interp_bounce_owner_depth;
+            s_lle_unwind_is_deadline = 1;
+            s_lle_resume_pc24 = s_lle_unwind_pc24;
             sync_interp_to_cpu(&in, cpu);
             bridge_apu_flush(cpu);
             return 1;
@@ -129,29 +129,6 @@ function(snesrecomp_platform_prepare_runner_sources sources_var snesrecomp_root)
     endif()
     string(REPLACE "${_loop_old}" "${_loop_new}"
         _patched "${_patched}")
-
-    # Drop the sticky flag so a deadline unwind stays a coroutine switch;
-    # returning instead abandons the callsite's JSR frame on the guest stack.
-    set(_deadline_old [=[
-    if (reached)
-        s_lle_next_unwind_is_deadline = 1;
-    return reached;
-]=])
-    set(_deadline_new [=[
-    return reached;
-]=])
-    if(SNESRECOMP_PLATFORM_LLE_DEADLINE_SEAM)
-        string(FIND "${_patched}" "${_deadline_old}" _deadline_pos)
-        if(_deadline_pos EQUAL -1)
-            message(FATAL_ERROR
-                "The pinned LLE deadline unwind context changed.")
-        endif()
-        string(REPLACE "${_deadline_old}" "${_deadline_new}"
-            _patched "${_patched}")
-    else()
-        message(STATUS
-            "snesrecomp-platform: LLE deadline seam OFF (upstream behaviour)")
-    endif()
 
     file(WRITE "${_overlay}" "${_patched}")
 
