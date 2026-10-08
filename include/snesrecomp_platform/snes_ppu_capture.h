@@ -194,6 +194,10 @@ typedef struct SnesPpuFrameCapture {
     uint32_t raster_memory_flags;
 
     SnesPpuLayoutState layout;
+
+    /* Raster CGRAM requires 256 colors per visible scanline. */
+    const uint16_t *cgram_lines;
+    unsigned cgram_line_count;
 } SnesPpuFrameCapture;
 
 enum {

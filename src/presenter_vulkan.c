@@ -2107,7 +2107,7 @@ static bool vulkan_present_mode7_hd(
         (VulkanPresenterContext *)presenter->context;
     uint8_t map_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
     uint8_t char_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
-    uint8_t palette[SNES_PPU_CGRAM_ENTRIES * 4u];
+    uint8_t palette[SNES_PPU_MAX_BANDS * SNES_PPU_CGRAM_ENTRIES * 4u];
     float affine[SNES_PPU_MAX_BANDS * 4u];
     uint8_t flags[SNES_PPU_MAX_BANDS * 4u];
     SnesRecompSemanticLineState semantic_lines[SNES_PPU_MAX_BANDS];
@@ -2208,8 +2208,9 @@ static bool vulkan_present_mode7_hd(
             flags[y * 4u + 3u] = band->bg[0].margin_right;
         }
     }
-    for (i = 0; i < SNES_PPU_CGRAM_ENTRIES; i++) {
-        const uint16_t c = cap->cgram[i];
+    const unsigned palette_height = cap->cgram_lines ? cap->visible_height : 1u;
+    for (i = 0; i < palette_height * SNES_PPU_CGRAM_ENTRIES; i++) {
+        const uint16_t c = (cap->cgram_lines ? cap->cgram_lines : cap->cgram)[i];
         palette[i * 4u + 0u] = (uint8_t)(c & 31u);
         palette[i * 4u + 1u] = (uint8_t)((c >> 5u) & 31u);
         palette[i * 4u + 2u] = (uint8_t)((c >> 10u) & 31u);
@@ -2230,7 +2231,7 @@ static bool vulkan_present_mode7_hd(
     uploads[1].pixels = char_tex;
     uploads[2].format = VK_FORMAT_R8G8B8A8_UNORM;
     uploads[2].width = SNES_PPU_CGRAM_ENTRIES;
-    uploads[2].height = 1u;
+    uploads[2].height = palette_height;
     uploads[2].bytes_per_pixel = 4u;
     uploads[2].pixels = palette;
     uploads[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;

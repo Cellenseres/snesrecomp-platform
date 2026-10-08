@@ -209,8 +209,11 @@ static bool link_mode7_program(SnesRecompPresenter *presenter) {
         "uniform float line_lerp;\n"
         "float byte_value(float v) { return floor(v * 255.0 + 0.5); }\n"
         "vec3 palette_rgb5(float index) {\n"
+        "  int row = textureSize(palette_texture, 0).y == 1 ? 0\n"
+        "      : clamp(int(floor(gl_FragCoord.y / hd_scale)),\n"
+        "              0, int(native_height) - 1);\n"
         "  return floor(texelFetch(palette_texture,\n"
-        "      ivec2(int(index), 0), 0).rgb * 255.0 + 0.5);\n"
+        "      ivec2(int(index), row), 0).rgb * 255.0 + 0.5);\n"
         "}\n"
         "vec2 wrap_texel(vec2 texel, vec2 limit) {\n"
         "  return texel - limit * floor(texel / limit);\n"
@@ -966,7 +969,7 @@ static bool opengl_present_mode7_hd(
         (OpenGlPresenterContext *)presenter->context;
     uint8_t map_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
     uint8_t char_tex[SNESRECOMP_MODE7_TEXTURE_TEXELS];
-    uint8_t palette[SNES_PPU_CGRAM_ENTRIES * 4u];
+    uint8_t palette[SNES_PPU_MAX_BANDS * SNES_PPU_CGRAM_ENTRIES * 4u];
     float affine[SNES_PPU_MAX_BANDS * 4u];
     uint8_t flags[SNES_PPU_MAX_BANDS * 4u];
     SnesRecompSemanticLineState semantic_lines[SNES_PPU_MAX_BANDS];
@@ -1050,8 +1053,9 @@ static bool opengl_present_mode7_hd(
             flags[y * 4u + 3u] = band->bg[0].margin_right;
         }
     }
-    for (unsigned i = 0; i < SNES_PPU_CGRAM_ENTRIES; i++) {
-        const uint16_t c = cap->cgram[i];
+    const unsigned palette_height = cap->cgram_lines ? cap->visible_height : 1u;
+    for (unsigned i = 0; i < palette_height * SNES_PPU_CGRAM_ENTRIES; i++) {
+        const uint16_t c = (cap->cgram_lines ? cap->cgram_lines : cap->cgram)[i];
         palette[i * 4u + 0u] = (uint8_t)(c & 31u);
         palette[i * 4u + 1u] = (uint8_t)((c >> 5u) & 31u);
         palette[i * 4u + 2u] = (uint8_t)((c >> 10u) & 31u);
@@ -1066,7 +1070,7 @@ static bool opengl_present_mode7_hd(
                          GL_UNSIGNED_BYTE, 128, 128, char_tex);
     glActiveTexture(GL_TEXTURE2);
     upload_mode7_texture(context->mode7_palette_texture, GL_RGBA8, GL_RGBA,
-                         GL_UNSIGNED_BYTE, 256, 1, palette);
+                         GL_UNSIGNED_BYTE, 256, (int)palette_height, palette);
     glActiveTexture(GL_TEXTURE3);
     upload_mode7_texture(context->mode7_line_texture, GL_RGBA32F, GL_RGBA,
                          GL_FLOAT, 1, (int)cap->visible_height, affine);

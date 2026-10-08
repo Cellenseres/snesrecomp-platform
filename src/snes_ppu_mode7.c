@@ -100,8 +100,13 @@ SnesPpuUnsupported snesrecomp_ppu_mode7_supports(
         cap->native_width != 256u || cap->canvas_width < cap->native_width ||
         cap->canvas_extra + cap->native_width > cap->canvas_width)
         return SNES_PPU_UNSUPPORTED_RASTER_STATE;
-    if (cap->raster_memory_flags)
+    if ((cap->raster_memory_flags & ~SNES_PPU_RASTER_MEMORY_CGRAM) ||
+        ((cap->raster_memory_flags & SNES_PPU_RASTER_MEMORY_CGRAM) &&
+         (!cap->cgram_lines || cap->cgram_line_count < cap->visible_height)))
         return SNES_PPU_UNSUPPORTED_RASTER_MEMORY;
+    if ((cap->cgram_lines && cap->cgram_line_count < cap->visible_height) ||
+        (!cap->cgram_lines && cap->cgram_line_count))
+        return SNES_PPU_UNSUPPORTED_RASTER_STATE;
     if (!HostObjPolicyInert(&cap->layout))
         return SNES_PPU_UNSUPPORTED_LAYOUT_POLICY;
 
@@ -726,6 +731,9 @@ bool snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
 
     for (size_t y = 0; y < output_height; y++) {
         const unsigned native_y = (unsigned)(y / scale);
+        const uint16_t *palette = cap->cgram_lines
+            ? cap->cgram_lines + (size_t)native_y * SNES_PPU_CGRAM_ENTRIES
+            : cap->cgram;
         const SnesRecompSemanticLineState *state = &semantic_lines[native_y];
         uint8_t *row = pixels + y * pitch;
         for (size_t x = 0; x < output_width; x++) {
@@ -735,7 +743,7 @@ bool snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
             const uint8_t mask = semantic_mask[native_offset];
             const uint8_t main_index = main_indices[output_offset];
             const unsigned source = main_sources[output_offset];
-            const uint16_t main_colour = cap->cgram[main_index];
+            const uint16_t main_colour = palette[main_index];
             unsigned r = (mask & SNESRECOMP_SEMANTIC_MAIN_RGB)
                 ? main_colour & 31u : 0u;
             unsigned g = (mask & SNESRECOMP_SEMANTIC_MAIN_RGB)
@@ -755,7 +763,7 @@ bool snesrecomp_ppu_mode7_render_reference_argb8888_with_map(
                 const uint8_t sub_index = sub_indices[output_offset];
                 uint16_t second;
                 if (add_subscreen && sub_index) {
-                    second = cap->cgram[sub_index];
+                    second = palette[sub_index];
                     half = (state->cgadsub & 0x40u) != 0;
                 } else {
                     second = (uint16_t)(state->fixed_r5 |

@@ -67,8 +67,9 @@ uint32_t snesrecomp_ppu_mode7_scale_mask(unsigned canvas_width,
  * captured per-pixel main-screen permission after OAM-order resolution.
  * OBJ on the subscreen and the standard SNES colour-math path are supported,
  * including colour windows, fixed colour, add/subtract and half colour.
+ * Raster CGRAM writes require complete per-visible-line palette snapshots.
  * Direct-colour Mode 7, large-field/character-fill, effective mosaic, ExtBG,
- * non-OBJ subscreens and raster-time memory writes fail closed. */
+ * non-OBJ subscreens and unrecorded raster memory writes fail closed. */
 SnesPpuUnsupported snesrecomp_ppu_mode7_supports(
     const SnesPpuFrameCapture *cap);
 

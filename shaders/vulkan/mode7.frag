@@ -38,8 +38,11 @@ layout(push_constant) uniform Mode7Push {
 float byte_value(float v) { return floor(v * 255.0 + 0.5); }
 
 vec3 palette_rgb5(float index) {
+    int row = textureSize(palette_texture, 0).y == 1 ? 0
+        : clamp(int(floor(gl_FragCoord.y / pc.hd_scale)),
+                0, int(pc.native_height) - 1);
     return floor(texelFetch(palette_texture,
-        ivec2(int(index), 0), 0).rgb * 255.0 + 0.5);
+        ivec2(int(index), row), 0).rgb * 255.0 + 0.5);
 }
 
 vec2 wrap_texel(vec2 texel, vec2 limit) {
