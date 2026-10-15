@@ -1263,6 +1263,19 @@ static unsigned opengl_get_display_millihertz(
     return snesrecomp_sdl_display_millihertz(context->window);
 }
 
+static bool opengl_set_vsync(SnesRecompPresenter *presenter, bool enabled) {
+    if (!make_current(presenter))
+        return false;
+    const bool changed = SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+    if (!changed)
+        set_sdl_error(presenter, "SDL_GL_SetSwapInterval");
+    int interval = 0;
+    presenter->vsync_state = SDL_GL_GetSwapInterval(&interval)
+        ? (interval ? SNESRECOMP_VSYNC_ENABLED : SNESRECOMP_VSYNC_DISABLED)
+        : SNESRECOMP_VSYNC_UNKNOWN;
+    return changed;
+}
+
 static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_destroy,
     opengl_present,
@@ -1273,6 +1286,7 @@ static const SnesRecompPresenterOps kOpenGlPresenterOps = {
     opengl_present_mode7_hd,
     opengl_get_display_scale,
     opengl_get_display_millihertz,
+    opengl_set_vsync,
 };
 
 static bool set_gl_attribute(

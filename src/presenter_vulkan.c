@@ -2532,6 +2532,16 @@ static unsigned vulkan_get_display_millihertz(
     return snesrecomp_sdl_display_millihertz(context->window);
 }
 
+static bool vulkan_set_vsync(SnesRecompPresenter *presenter, bool enabled) {
+    VulkanPresenterContext *context =
+        (VulkanPresenterContext *)presenter->context;
+    if (context->vsync_requested != enabled) {
+        context->vsync_requested = enabled;
+        context->swapchain_stale = true;
+    }
+    return true;
+}
+
 static const SnesRecompPresenterOps kVulkanPresenterOps = {
     vulkan_destroy,
     vulkan_present,
@@ -2542,6 +2552,7 @@ static const SnesRecompPresenterOps kVulkanPresenterOps = {
     vulkan_present_mode7_hd,
     vulkan_get_display_scale,
     vulkan_get_display_millihertz,
+    vulkan_set_vsync,
 };
 
 

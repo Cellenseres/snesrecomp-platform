@@ -392,6 +392,23 @@ static unsigned sdl_get_display_millihertz(
     return snesrecomp_sdl_display_millihertz(context->window);
 }
 
+static bool sdl_set_vsync(SnesRecompPresenter *presenter, bool enabled) {
+    SdlPresenterContext *context = (SdlPresenterContext *)presenter->context;
+    if (presenter->backend == SNESRECOMP_PRESENT_BACKEND_SDL_SOFTWARE) {
+        snesrecomp_presenter_set_error(presenter,
+            "software presentation has no VSync control");
+        return false;
+    }
+    const bool changed = SDL_SetRenderVSync(context->renderer, enabled ? 1 : 0);
+    if (!changed)
+        set_sdl_error(presenter, "SDL_SetRenderVSync");
+    int interval = 0;
+    presenter->vsync_state = SDL_GetRenderVSync(context->renderer, &interval)
+        ? (interval ? SNESRECOMP_VSYNC_ENABLED : SNESRECOMP_VSYNC_DISABLED)
+        : SNESRECOMP_VSYNC_UNKNOWN;
+    return changed;
+}
+
 static const SnesRecompPresenterOps kSdlPresenterOps = {
     sdl_destroy,
     sdl_present,
@@ -402,6 +419,7 @@ static const SnesRecompPresenterOps kSdlPresenterOps = {
     NULL,
     sdl_get_display_scale,
     sdl_get_display_millihertz,
+    sdl_set_vsync,
 };
 
 bool snesrecomp_presenter_sdl_create(

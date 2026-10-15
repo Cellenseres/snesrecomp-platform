@@ -243,6 +243,37 @@ if(SNESRECOMP_PLATFORM_BUILD_TESTS)
     add_test(NAME snesrecomp_platform_smoke
         COMMAND snesrecomp_platform_smoke)
 
+    add_executable(snesrecomp_platform_vsync_smoke
+        tests/presenter_vsync_smoke.c)
+    target_link_libraries(snesrecomp_platform_vsync_smoke PRIVATE
+        snesrecomp::platform SDL3::SDL3)
+    if(WIN32 AND TARGET SDL3::SDL3-shared)
+        add_custom_command(TARGET snesrecomp_platform_vsync_smoke POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:SDL3::SDL3-shared>"
+                "$<TARGET_FILE_DIR:snesrecomp_platform_vsync_smoke>")
+    endif()
+    add_test(NAME snesrecomp_platform_vsync_software
+        COMMAND snesrecomp_platform_vsync_smoke software)
+    set_tests_properties(snesrecomp_platform_vsync_software PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+    add_test(NAME snesrecomp_platform_vsync_sdl
+        COMMAND snesrecomp_platform_vsync_smoke sdl)
+    set_tests_properties(snesrecomp_platform_vsync_sdl PROPERTIES
+        SKIP_RETURN_CODE 77)
+    if(SNESRECOMP_PLATFORM_ENABLE_OPENGL)
+        add_test(NAME snesrecomp_platform_vsync_opengl
+            COMMAND snesrecomp_platform_vsync_smoke opengl)
+        set_tests_properties(snesrecomp_platform_vsync_opengl PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endif()
+    if(SNESRECOMP_PLATFORM_ENABLE_VULKAN)
+        add_test(NAME snesrecomp_platform_vsync_vulkan
+            COMMAND snesrecomp_platform_vsync_smoke vulkan)
+        set_tests_properties(snesrecomp_platform_vsync_vulkan PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endif()
+
     # Measures presentation pacing only; not registered as a test because it
     # reports timings rather than passing or failing.
     add_executable(snesrecomp_platform_presenter_bench

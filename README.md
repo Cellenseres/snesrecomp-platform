@@ -12,7 +12,7 @@ library takes care of presenting it.
 - SDL accelerated and software output
 - OpenGL 3.3 output
 - native Vulkan 1.0 output, optional at build time
-- pixel-aspect handling, scaling, fullscreen, filtering and VSync reporting
+- pixel-aspect handling, scaling, fullscreen, filtering and runtime VSync control
 - DPI-aware presentation-space overlay layers, independent of game scaling
 - optional GLSL/GLSLP shader presets
 - a public native-presenter backend contract for target adapters

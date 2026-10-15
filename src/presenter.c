@@ -236,6 +236,19 @@ bool snesrecomp_presenter_set_fullscreen(
     return presenter->ops->set_fullscreen(presenter, fullscreen);
 }
 
+bool snesrecomp_presenter_set_vsync(
+    SnesRecompPresenter *presenter,
+    bool enabled) {
+    if (!presenter)
+        return false;
+    if (!presenter->ops || !presenter->ops->set_vsync) {
+        snesrecomp_presenter_set_error(presenter,
+            "runtime VSync control is unsupported by this backend");
+        return false;
+    }
+    return presenter->ops->set_vsync(presenter, enabled);
+}
+
 bool snesrecomp_presenter_set_window_scale(
     SnesRecompPresenter *presenter,
     int scale) {

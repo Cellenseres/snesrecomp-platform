@@ -29,6 +29,8 @@ typedef struct SnesRecompPresenterOps {
         const SnesRecompMode7HdFrame *frame);
     float (*get_display_scale)(SnesRecompPresenter *presenter);
     unsigned (*get_display_millihertz)(SnesRecompPresenter *presenter);
+    /* Optional; appended to preserve existing backend initializers. */
+    bool (*set_vsync)(SnesRecompPresenter *presenter, bool enabled);
 } SnesRecompPresenterOps;
 
 struct SnesRecompPresenter {

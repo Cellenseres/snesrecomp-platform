@@ -208,6 +208,13 @@ bool snesrecomp_presenter_set_fullscreen(
     SnesRecompPresenter *presenter,
     bool fullscreen);
 
+/* Change presentation pacing without recreating the window. Returns false
+ * when unsupported or rejected. Vulkan applies the request on its next present;
+ * vsync_state reports the active mode, which may differ on some drivers. */
+bool snesrecomp_presenter_set_vsync(
+    SnesRecompPresenter *presenter,
+    bool enabled);
+
 bool snesrecomp_presenter_set_window_scale(
     SnesRecompPresenter *presenter,
     int scale);
