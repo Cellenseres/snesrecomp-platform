@@ -14,6 +14,7 @@
 typedef struct OpenGlPresenterContext {
     SDL_Window *window;
     SDL_GLContext gl_context;
+    bool gl_functions_loaded;
     GLuint texture;
     GLuint overlay_textures[SNESRECOMP_OVERLAY_MAX_LAYERS];
     GLuint vertex_array;
@@ -514,47 +515,49 @@ static void opengl_destroy(SnesRecompPresenter *presenter) {
     if (!context)
         return;
 
-    if (context->gl_context && context->window)
-        (void)SDL_GL_MakeCurrent(context->window, context->gl_context);
-    if (context->preset && context->preset_interface &&
-        context->preset_interface->destroy) {
-        context->preset_interface->destroy(context->preset);
+    if (context->gl_functions_loaded) {
+        if (context->gl_context && context->window)
+            (void)SDL_GL_MakeCurrent(context->window, context->gl_context);
+        if (context->preset && context->preset_interface &&
+            context->preset_interface->destroy) {
+            context->preset_interface->destroy(context->preset);
+        }
+        if (context->mode7_program)
+            glDeleteProgram(context->mode7_program);
+        if (context->mode7_fbo)
+            glDeleteFramebuffers(1, &context->mode7_fbo);
+        {
+            const GLuint mode7_textures[] = {
+                context->mode7_target,
+                context->mode7_map_texture,
+                context->mode7_char_texture,
+                context->mode7_palette_texture,
+                context->mode7_line_texture,
+                context->mode7_flags_texture,
+                context->mode7_obj_texture,
+                context->mode7_window_texture,
+                context->mode7_math_texture,
+            };
+            glDeleteTextures(
+                (GLsizei)(sizeof mode7_textures / sizeof mode7_textures[0]),
+                mode7_textures);
+        }
+        if (context->program)
+            glDeleteProgram(context->program);
+        if (context->vertex_buffer)
+            glDeleteBuffers(1, &context->vertex_buffer);
+        if (context->vertex_array)
+            glDeleteVertexArrays(1, &context->vertex_array);
+        if (context->preset_vertex_array)
+            glDeleteVertexArrays(1, &context->preset_vertex_array);
+        if (context->texture)
+            glDeleteTextures(1, &context->texture);
+        glDeleteTextures(
+            (GLsizei)SNESRECOMP_OVERLAY_MAX_LAYERS,
+            context->overlay_textures);
     }
     free(context->mode7_obj_pixels);
     free(context->mode7_window_pixels);
-    if (context->mode7_program)
-        glDeleteProgram(context->mode7_program);
-    if (context->mode7_fbo)
-        glDeleteFramebuffers(1, &context->mode7_fbo);
-    {
-        const GLuint mode7_textures[] = {
-            context->mode7_target,
-            context->mode7_map_texture,
-            context->mode7_char_texture,
-            context->mode7_palette_texture,
-            context->mode7_line_texture,
-            context->mode7_flags_texture,
-            context->mode7_obj_texture,
-            context->mode7_window_texture,
-            context->mode7_math_texture,
-        };
-        glDeleteTextures(
-            (GLsizei)(sizeof mode7_textures / sizeof mode7_textures[0]),
-            mode7_textures);
-    }
-    if (context->program)
-        glDeleteProgram(context->program);
-    if (context->vertex_buffer)
-        glDeleteBuffers(1, &context->vertex_buffer);
-    if (context->vertex_array)
-        glDeleteVertexArrays(1, &context->vertex_array);
-    if (context->preset_vertex_array)
-        glDeleteVertexArrays(1, &context->preset_vertex_array);
-    if (context->texture)
-        glDeleteTextures(1, &context->texture);
-    glDeleteTextures(
-        (GLsizei)SNESRECOMP_OVERLAY_MAX_LAYERS,
-        context->overlay_textures);
     if (context->gl_context)
         (void)SDL_GL_DestroyContext(context->gl_context);
     if (context->window)
@@ -1357,6 +1360,7 @@ bool snesrecomp_presenter_opengl_create(
             presenter, "could not load required OpenGL functions");
         return false;
     }
+    context->gl_functions_loaded = true;
     if (!ogl_IsVersionGEQ(3, 3)) {
         const char *version = (const char *)glGetString(GL_VERSION);
         snesrecomp_presenter_set_error(
