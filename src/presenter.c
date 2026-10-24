@@ -100,9 +100,17 @@ bool snesrecomp_presenter_create(
     bool created = false;
     switch (config->backend) {
     case SNESRECOMP_PRESENT_BACKEND_AUTO:
+#if !SNESRECOMP_PLATFORM_HAS_SDL && SNESRECOMP_PLATFORM_HAS_NATIVE_PRESENTER
+        created = snesrecomp_presenter_native_create(presenter, config);
+        break;
+#endif
     case SNESRECOMP_PRESENT_BACKEND_SDL:
     case SNESRECOMP_PRESENT_BACKEND_SDL_SOFTWARE:
+#if SNESRECOMP_PLATFORM_HAS_SDL
         created = snesrecomp_presenter_sdl_create(presenter, config);
+#else
+        snesrecomp_presenter_set_error(presenter, "SDL presenter is not compiled");
+#endif
         break;
     case SNESRECOMP_PRESENT_BACKEND_OPENGL:
 #if SNESRECOMP_PLATFORM_HAS_OPENGL
@@ -169,6 +177,7 @@ int snesrecomp_presenter_display_width(
 void snesrecomp_presenter_destroy(SnesRecompPresenter *presenter) {
     if (!presenter)
         return;
+    snesrecomp_presenter_ppu_cancel(presenter);
     if (presenter->ops && presenter->ops->destroy)
         presenter->ops->destroy(presenter);
     free(presenter);
@@ -226,6 +235,17 @@ bool snesrecomp_presenter_present_mode7_hd(
         return false;
     }
     return presenter->ops->present_mode7_hd(presenter, frame);
+}
+
+bool snesrecomp_presenter_present_blits(SnesRecompPresenter *presenter,
+    const SnesRecompVideoFrame *base, const SnesRecompBlitPlan *plan) {
+    if (!presenter || !presenter->ops ||
+        !(presenter->capabilities & SNESRECOMP_PRESENT_CAP_RESOLVED_BLITS) ||
+        !presenter->ops->present_blits || !base || !plan || !base->pixels ||
+        base->overlay || base->pixel_format != SNESRECOMP_PIXEL_FORMAT_ARGB8888 ||
+        base->width != plan->width || base->height != plan->height ||
+        base->pitch < base->width * 4) return false;
+    return presenter->ops->present_blits(presenter, base, plan);
 }
 
 bool snesrecomp_presenter_set_fullscreen(

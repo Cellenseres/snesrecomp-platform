@@ -33,6 +33,19 @@ static SemanticWindow PrepareWindow(const SnesPpuFrameCapture *cap,
         : ((unsigned)band->regs[RAW_WBGLOG] >> (layer * 2u)) & 3u);
     window.w1_invert = (selector & 1u) != 0;
     window.w2_invert = (selector & 4u) != 0;
+    if(cap->resolved_windows) for(unsigned bi=0;bi<cap->band_count;++bi)
+        if(cap->bands[bi].y_begin==band->y_begin) {
+            const SnesPpuResolvedWindow *r=cap->resolved_windows+bi*6u+layer;
+            if(r->selector!=255u) {
+                window.w1_left=r->w1_left;window.w1_right=r->w1_right;
+                window.w2_left=r->w2_left;window.w2_right=r->w2_right;
+                window.logic=r->logic;window.w1_enabled=(r->selector&2u)!=0;
+                window.w2_enabled=(r->selector&8u)!=0;
+                window.w1_invert=(r->selector&1u)!=0;window.w2_invert=(r->selector&4u)!=0;
+                return window;
+            }
+            break;
+        }
 
     if (layer < 3u) {
         screen_left = -(int)band->bg[layer].margin_left;
@@ -71,10 +84,11 @@ static SemanticWindow PrepareWindow(const SnesPpuFrameCapture *cap,
         }
     }
 
-    window.w1_enabled = (selector & 2u) != 0 &&
-                        window.w1_left <= window.w1_right;
-    window.w2_enabled = (selector & 8u) != 0 &&
-                        window.w2_left <= window.w2_right;
+    /* An empty interval remains an enabled logical input: its coverage is
+     * false before inversion. Disabling it instead changes AND/XOR/XNOR and
+     * loses an inverted empty window's constant-true mask. */
+    window.w1_enabled = (selector & 2u) != 0;
+    window.w2_enabled = (selector & 8u) != 0;
     return window;
 }
 
@@ -107,6 +121,61 @@ static bool ModeAllows(unsigned mode, bool inside) {
 uint8_t snesrecomp_ppu_semantic_meta(unsigned source, bool palette_zero) {
     return (uint8_t)((source & 7u) |
                      (palette_zero ? SNESRECOMP_SEMANTIC_META_ZERO : 0u));
+}
+
+static void AddEdge(int *edges, unsigned *count, int edge, unsigned width) {
+    if (edge <= 0 || edge >= (int)width) return;
+    unsigned pos = 0;
+    while (pos < *count && edges[pos] < edge) ++pos;
+    if (pos < *count && edges[pos] == edge) return;
+    memmove(edges + pos + 1, edges + pos, (*count - pos) * sizeof(*edges));
+    edges[pos] = edge;
+    ++*count;
+}
+
+unsigned snesrecomp_ppu_window_spans(const SnesPpuFrameCapture *cap,
+    const SnesPpuRasterBand *band, SnesRecompWindowSpan *spans, unsigned capacity) {
+    if (!cap || !band || !spans || !cap->canvas_width) return 0;
+    SemanticWindow windows[5];
+    int edges[24] = {0};
+    unsigned count = 2;
+    edges[1] = cap->canvas_width;
+    for (unsigned i = 0; i < 5; ++i) {
+        windows[i] = PrepareWindow(cap, band, i < 3 ? i : i == 3 ? 5 : 4);
+        AddEdge(edges, &count, windows[i].w1_left + cap->canvas_extra, cap->canvas_width);
+        AddEdge(edges, &count, windows[i].w1_right + 1 + cap->canvas_extra, cap->canvas_width);
+        AddEdge(edges, &count, windows[i].w2_left + cap->canvas_extra, cap->canvas_width);
+        AddEdge(edges, &count, windows[i].w2_right + 1 + cap->canvas_extra, cap->canvas_width);
+    }
+    AddEdge(edges, &count, (int)cap->canvas_extra - cap->layout.extra_left_cur, cap->canvas_width);
+    AddEdge(edges, &count, 256 + cap->canvas_extra + cap->layout.extra_right_cur, cap->canvas_width);
+    if (capacity < count - 1) return 0;
+    unsigned used = 0;
+    for (unsigned i = 0; i + 1 < count; ++i) {
+        const int sx = edges[i] - (int)cap->canvas_extra;
+        uint8_t bits = 0, obj = 0;
+        for (unsigned bg = 0; bg < 3; ++bg) {
+            bool masked = WindowValue(&windows[bg], sx);
+            if ((band->main_enable & (1u << bg)) &&
+                (!(band->main_window_enable & (1u << bg)) || !masked)) bits |= 1u << bg;
+            if ((band->sub_enable & (1u << bg)) &&
+                (!(band->sub_window_enable & (1u << bg)) || !masked)) bits |= 1u << (bg + 3);
+        }
+        bool inside = WindowValue(&windows[3], sx);
+        if (sx >= -(int)cap->layout.extra_left_cur && sx < 256 + (int)cap->layout.extra_right_cur) {
+            if (ModeAllows(band->cgwsel >> 6, inside)) bits |= SNESRECOMP_SEMANTIC_MAIN_RGB;
+            if (ModeAllows(band->cgwsel >> 4, inside)) bits |= SNESRECOMP_SEMANTIC_MATH;
+        }
+        bool masked = WindowValue(&windows[4], sx);
+        if ((band->main_enable & 16u) && (!(band->main_window_enable & 16u) || !masked))
+            obj |= SNESRECOMP_SEMANTIC_OBJ_MAIN;
+        if ((band->sub_enable & 16u) && (!(band->sub_window_enable & 16u) || !masked))
+            obj |= SNESRECOMP_SEMANTIC_OBJ_SUB;
+        if (used && spans[used - 1].mask == bits && spans[used - 1].obj_mask == obj)
+            spans[used - 1].end = (uint16_t)edges[i + 1];
+        else spans[used++] = (SnesRecompWindowSpan){(uint16_t)edges[i], (uint16_t)edges[i+1], bits, obj};
+    }
+    return used;
 }
 
 unsigned snesrecomp_ppu_semantic_source(uint8_t metadata) {

@@ -48,6 +48,12 @@ enum {
     SNES_PPU_REG_BLOCK_BYTES = 0x40,
 };
 
+enum { SNES_PPU_ELASTIC_SEGMENTS = 8 };
+typedef struct SnesPpuElasticSegment {
+    int16_t source_begin, source_end;
+    int16_t destination_begin, destination_end;
+} SnesPpuElasticSegment;
+
 typedef struct SnesPpuBgState {
     uint16_t tilemap_word_addr;   /* BGnSC base, in VRAM words */
     uint16_t char_word_addr;      /* BGnNBA base, in VRAM words */
@@ -67,6 +73,12 @@ typedef struct SnesPpuBgState {
     /* The margin is filled by cyclically copying the native scanline rather
      * than by widening the layer's own fetch. */
     bool margin_repeats;
+
+    /* Resolved for this raster band by the consumer. Sample native source
+     * pixels at destination centres, then apply destination colour math.
+     * Ordered, disjoint destinations; uncovered columns are transparent. */
+    uint8_t elastic_count;
+    SnesPpuElasticSegment elastic[SNES_PPU_ELASTIC_SEGMENTS];
 } SnesPpuBgState;
 
 typedef struct SnesPpuRasterBand {
@@ -101,6 +113,14 @@ typedef struct SnesPpuRasterBand {
      * from a live frame. */
     uint8_t regs[SNES_PPU_REG_BLOCK_BYTES];
 } SnesPpuRasterBand;
+/* Consumer-resolved window coordinates, already in native logical X space.
+ * Selector uses the four original enable/invert bits; 255 means use raw
+ * registers and the captured ordinary expansion policy for that layer.
+ * Ordered BG1..BG4, OBJ, colour. No game predicates remain in this payload. */
+typedef struct SnesPpuResolvedWindow {
+    int16_t w1_left,w1_right,w2_left,w2_right;
+    uint8_t selector,logic;
+} SnesPpuResolvedWindow;
 
 /* Widescreen policy, which is renderer state rather than SNES state: it is
  * published once a frame by the host and does not appear in the register file.
@@ -198,6 +218,20 @@ typedef struct SnesPpuFrameCapture {
     /* Raster CGRAM requires 256 colors per visible scanline. */
     const uint16_t *cgram_lines;
     unsigned cgram_line_count;
+
+    /* Resolved 64x64 maps, in snes_bg_upload's RGBA encoding. */
+    const uint8_t *resolved_bg[SNES_PPU_BG_COUNT];
+    uint32_t resolved_bg_serial[SNES_PPU_BG_COUNT];
+    /* Required maps missing from this mask cannot be reconstructed. */
+    uint8_t resolved_bg_required;
+
+    /* Qualified visible OBJ pixels, after the timeline's single evaluation.
+     * Bits 0..7: CGRAM index, 8..9: priority, 10: math, 11: covered.
+     * No OAM, status flags or temporal host classifiers are replayed. */
+    const uint16_t *obj_pixels;
+    uint16_t obj_pitch;          /* uint16_t elements per visible row */
+    /* Optional game-resolved windows, six layers per raster band. */
+    const SnesPpuResolvedWindow *resolved_windows;
 } SnesPpuFrameCapture;
 
 enum {

@@ -9,6 +9,7 @@ library takes care of presenting it.
 
 ## Current features
 
+- an SDK-free `snesrecomp::ppu` target for immutable captures, jobs and graphics caches
 - SDL accelerated and software output
 - OpenGL 3.3 output
 - native Vulkan 1.0 output, optional at build time
@@ -136,6 +137,27 @@ PPU output stays authentic and the crop is a caller policy.
 The included CMake helpers can create reviewed build-tree copies for small
 version-pinned integrations with `snesrecomp` and `recomp-ui`. Fetched
 dependency sources stay unchanged.
+
+## Portable PPU integration
+
+Set `SNESRECOMP_PLATFORM_ENABLE_SDL=OFF` to build the portable PPU and runtime
+without SDL or a console SDK. Existing `snesrecomp::platform` consumers keep
+all PPU symbols through a public dependency on `snesrecomp::ppu`. Headless
+consumers can use the serial task adapter or provide their own task source.
+
+Frames and jobs own the data required after capture: raster state, qualified
+objects, palette changes, resolved windows and widescreen maps. Indexed and raw
+plans retain tile and geometry resources independently of palette and brightness
+updates. Optional presenter prepare/submit/cancel operations explicitly report
+PPU capabilities; presenting a native framebuffer does not imply SNES rendering.
+Existing backend operation fields retain their order, including `set_vsync`.
+New operations are appended and omitted operations stay unavailable.
+
+Source adapters under `cmake` operate on reviewed immutable build-tree copies.
+The eventless beam certificate excludes IRQ, line/HBlank and automatic-pad
+boundaries. The native APU-program idle callback is optional and cannot cross
+port, timer, DSP-sample or program-access events. These interfaces do not supply
+an OpenDSP firmware or enable any console backend automatically.
 
 ## Tests
 

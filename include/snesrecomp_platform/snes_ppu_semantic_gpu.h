@@ -51,6 +51,17 @@ typedef struct SnesRecompSemanticLineState {
     uint8_t bg3_priority;
 } SnesRecompSemanticLineState;
 
+enum { SNESRECOMP_WINDOW_MAX_SPANS = 23 };
+typedef struct SnesRecompWindowSpan {
+    uint16_t begin, end;
+    uint8_t mask, obj_mask;
+} SnesRecompWindowSpan;
+
+/* At most twenty window edges plus the two composition edges. */
+unsigned snesrecomp_ppu_window_spans(const SnesPpuFrameCapture *capture,
+    const SnesPpuRasterBand *band, SnesRecompWindowSpan *spans,
+    unsigned capacity);
+
 uint8_t snesrecomp_ppu_semantic_meta(unsigned source, bool palette_zero);
 unsigned snesrecomp_ppu_semantic_source(uint8_t metadata);
 bool snesrecomp_ppu_semantic_palette_zero(uint8_t metadata);

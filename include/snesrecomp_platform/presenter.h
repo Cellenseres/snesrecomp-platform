@@ -1,5 +1,7 @@
 #ifndef SNESRECOMP_PLATFORM_PRESENTER_H
 #define SNESRECOMP_PLATFORM_PRESENTER_H
+#include "snesrecomp_platform/ppu_blit.h"
+#include "snesrecomp_platform/abi.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -7,12 +9,80 @@
 
 #include "snesrecomp_platform/snes_ppu_mode7.h"
 #include "snesrecomp_platform/snes_ppu_obj.h"
+#include "snesrecomp_platform/snes_ppu_frame.h"
+#include "snesrecomp_platform/snes_ppu_job.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct SnesRecompPresenter SnesRecompPresenter;
+
+enum {
+    SNESRECOMP_PPU_CAP_MODE1 = 1u << 0,
+    SNESRECOMP_PPU_CAP_OBJ = 1u << 1,
+    SNESRECOMP_PPU_CAP_WINDOWS = 1u << 2,
+    SNESRECOMP_PPU_CAP_COLOUR_MATH = 1u << 3,
+    SNESRECOMP_PPU_CAP_MODE7 = 1u << 4,
+    SNESRECOMP_PPU_CAP_RASTER_PALETTE = 1u << 5,
+    SNESRECOMP_PPU_CAP_RESOLVED_BG = 1u << 6,
+    SNESRECOMP_PPU_CAP_POST_OVERLAYS = 1u << 7,
+    /* Exact resolved source/destination segments, including clipped sampling. */
+    SNESRECOMP_PPU_CAP_ELASTIC = 1u << 8,
+    /* Integer source brightness for unconditional RGB5 post images. */
+    SNESRECOMP_PPU_CAP_POST_RGB5_BRIGHTNESS = 1u << 9,
+    SNESRECOMP_PPU_CAP_BG_SOURCES = 1u << 10,
+    /* Resolved opaque rectangles over a GPU-generated PPU base. */
+    SNESRECOMP_PPU_CAP_POST_BLITS = 1u << 11,
+    SNESRECOMP_PPU_CAP_PRIMITIVES = 1u << 12,
+    SNESRECOMP_PPU_CAP_INDEXED_LAYOUT = 1u << 13
+};
+
+typedef struct SnesRecompPpuStats {
+    uint64_t prepared, submitted, cancelled;
+    uint64_t rejected[SNESRECOMP_PPU_RESULT_COUNT];
+    uint64_t capture_us, cache_us, submit_us, complete_us, present_us, wait_us, fallback_us;
+    uint64_t upload_bytes;
+    uint32_t draw_calls;
+    SnesRecompPpuResult last_result;
+    SnesPpuUnsupported unsupported;
+    /* A zero duration is a measurement only when its validity bit is set.
+     * Completion describes the previous GPU frame; presentation can include
+     * queue pacing. These overlapping costs must not be added blindly. */
+    uint32_t timing_valid;
+    uint32_t primitive_commands, primitive_commands_generated;
+    uint32_t primitive_sources_reused, primitive_image_reused;
+    uint32_t background_prefix_reused;
+} SnesRecompPpuStats;
+
+enum {
+    SNESRECOMP_PPU_TIME_CAPTURE = 1u << 0,
+    SNESRECOMP_PPU_TIME_CACHE = 1u << 1,
+    SNESRECOMP_PPU_TIME_SUBMIT = 1u << 2,
+    SNESRECOMP_PPU_TIME_COMPLETE_PREVIOUS = 1u << 3,
+    SNESRECOMP_PPU_TIME_PRESENT = 1u << 4,
+    SNESRECOMP_PPU_TIME_WAIT = 1u << 5,
+    SNESRECOMP_PPU_TIME_FALLBACK = 1u << 6
+};
+
+uint32_t snesrecomp_presenter_ppu_capabilities(const SnesRecompPresenter *presenter);
+/* Clear per-frame costs, retaining lifetime counters. Pending jobs are unchanged. */
+bool snesrecomp_presenter_ppu_begin_frame(SnesRecompPresenter *presenter);
+/* Preparation pins the immutable snapshot until submit or cancel.
+ * No display or guest side effects are allowed during preparation.
+ * Submit consumes the reservation, including on failure. A failed submit
+ * must not have published a partial frame. GPU data must be owned by the
+ * backend before submit returns; the source may then be reused. */
+SnesRecompPpuResult snesrecomp_presenter_ppu_prepare(
+    SnesRecompPresenter *presenter, const SnesRecompPpuFrame *frame);
+/* A nonempty post-overlay job requires the backend's explicit job operation.
+ * Legacy adapters can only prepare empty jobs; required art is never ignored. */
+SnesRecompPpuResult snesrecomp_presenter_ppu_prepare_job(
+    SnesRecompPresenter *presenter, const SnesRecompPpuJob *job);
+SnesRecompPpuResult snesrecomp_presenter_ppu_submit(SnesRecompPresenter *presenter);
+void snesrecomp_presenter_ppu_cancel(SnesRecompPresenter *presenter);
+void snesrecomp_presenter_ppu_stats(const SnesRecompPresenter *presenter,
+                                   SnesRecompPpuStats *out);
 
 typedef enum SnesRecompPresentBackend {
     SNESRECOMP_PRESENT_BACKEND_AUTO = 0,
@@ -36,7 +106,8 @@ typedef enum SnesRecompPresentCapability {
     SNESRECOMP_PRESENT_CAP_MULTIPASS = 1u << 2,
     SNESRECOMP_PRESENT_CAP_OVERLAYS = 1u << 3,
     SNESRECOMP_PRESENT_CAP_3D = 1u << 4,
-    SNESRECOMP_PRESENT_CAP_HD_MODE7 = 1u << 5
+    SNESRECOMP_PRESENT_CAP_HD_MODE7 = 1u << 5,
+    SNESRECOMP_PRESENT_CAP_RESOLVED_BLITS = 1u << 6
 } SnesRecompPresentCapability;
 
 /*
@@ -92,7 +163,7 @@ typedef struct SnesRecompShaderPresetInterface {
 
 /* These types cross static-library boundaries. GCC's arm-*-eabi default can
  * otherwise give the adapter and its caller different structure layouts. */
-_Static_assert(sizeof(SnesRecompPresentBackend) == sizeof(int) &&
+SNESRECOMP_STATIC_ASSERT(sizeof(SnesRecompPresentBackend) == sizeof(int) &&
                    sizeof(SnesRecompPixelFormat) == sizeof(int) &&
                    sizeof(SnesRecompOverlaySpace) == sizeof(int) &&
                    sizeof(SnesRecompPresentScaling) == sizeof(int) &&
@@ -197,6 +268,11 @@ void snesrecomp_presenter_destroy(SnesRecompPresenter *presenter);
 bool snesrecomp_presenter_present(
     SnesRecompPresenter *presenter,
     const SnesRecompVideoFrame *frame);
+/* Synchronous opaque composition before presentation filtering. Sources stay
+ * immutable through this call. Failure presents nothing; the consumer applies
+ * the CPU oracle and calls ordinary present. No implicit base-only display. */
+bool snesrecomp_presenter_present_blits(SnesRecompPresenter *presenter,
+    const SnesRecompVideoFrame *base, const SnesRecompBlitPlan *plan);
 
 /* Returns false without presenting when this backend cannot render the
  * requested semantic frame. The caller can then submit its authentic frame. */

@@ -123,7 +123,7 @@ SnesPpuUnsupported snesrecomp_ppu_mode7_supports(
         /* A widened Mode 7 band is valid only when its non-repeating BG1
          * coverage stays inside the shared canvas. This makes the portable
          * contract explicit for both symmetric and asymmetric layouts. */
-        if (b->bg[0].margin_repeats ||
+        if (b->bg[0].margin_repeats || b->bg[0].elastic_count ||
             b->bg[0].margin_left > cap->canvas_extra ||
             b->bg[0].margin_right >
                 cap->canvas_width - cap->canvas_extra - cap->native_width)

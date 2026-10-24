@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "snesrecomp_platform/snes_ppu_capture.h"
+#include "snesrecomp_platform/snes_ppu_job.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,7 +48,38 @@ extern "C" {
  * whatever OAM the running process happens to hold. */
 #define SNES_PPU_TRACE_VERSION_V2 2u
 #define SNES_PPU_TRACE_VERSION_V3 3u
-#define SNES_PPU_TRACE_VERSION 4u
+#define SNES_PPU_TRACE_VERSION_V4 4u
+/* 5: raster palettes, resolved maps and qualified OBJ pixels; extra hash. */
+#define SNES_PPU_TRACE_VERSION 5u
+/* 6: owned, ordered post-composition images/rectangles and job sequence.
+ * Capture-only readers explicitly refuse these files rather than omit art. */
+#define SNES_PPU_TRACE_JOB_VERSION 6u
+/* 7/8 add band-local elastic source/destination segments to capture/job traces.
+ * Writers retain v5/v6 bytes when no remapping is present. */
+#define SNES_PPU_TRACE_ELASTIC_VERSION 7u
+#define SNES_PPU_TRACE_ELASTIC_JOB_VERSION 8u
+/* 9/10: source brightness in the former zero overlay byte; 10 adds elastic bands. */
+#define SNES_PPU_TRACE_BRIGHTNESS_JOB_VERSION 9u
+#define SNES_PPU_TRACE_ELASTIC_BRIGHTNESS_JOB_VERSION 10u
+/* 11/12: owned BG source rectangles before post overlays; former reserved
+ * header word is source count. 12 additionally stores elastic bands. */
+#define SNES_PPU_TRACE_SOURCE_JOB_VERSION 11u
+#define SNES_PPU_TRACE_ELASTIC_SOURCE_JOB_VERSION 12u
+/* 13/14: resolved window coordinates per band (plain/elastic capture).
+ * 15/16 combine them with source/post jobs (plain/elastic bands). */
+#define SNES_PPU_TRACE_WINDOW_VERSION 13u
+#define SNES_PPU_TRACE_ELASTIC_WINDOW_VERSION 14u
+#define SNES_PPU_TRACE_WINDOW_JOB_VERSION 15u
+#define SNES_PPU_TRACE_ELASTIC_WINDOW_JOB_VERSION 16u
+/* 17: primitive job envelope. Two complete capture records retain the displayed
+ * base and original graphics context, including independent palette histories,
+ * resolved windows/maps and qualified OBJ/sliver data. Ordered primitive,
+ * material and image payloads are field-serialised and bounded. Nested job or
+ * envelope records are refused; older capture/job formats remain unchanged. */
+#define SNES_PPU_TRACE_PRIMITIVE_JOB_VERSION 17u
+/* 18: owned indexed layout/axes, original qualified/clipped OBJ runs, source
+ * materials, row authority and independent displayed/graphics captures. */
+#define SNES_PPU_TRACE_INDEXED_JOB_VERSION 18u
 
 enum {
     SNES_PPU_TRACE_VRAM_BYTES = 0x10000,   /* 64 KiB, the whole of VRAM */
@@ -92,6 +124,10 @@ typedef struct SnesPpuTrace {
     uint16_t *cgram;
     uint16_t *oam;
     uint8_t *high_oam;
+    uint16_t *cgram_lines;
+    uint16_t *obj_pixels;
+    uint8_t *resolved_bg[SNES_PPU_BG_COUNT];
+    SnesPpuResolvedWindow *resolved_windows;
 } SnesPpuTrace;
 
 /* A stable 64-bit hash. FNV-1a: not cryptographic, but deterministic across
@@ -114,6 +150,14 @@ bool snesrecomp_ppu_trace_write(const char *path,
  * allocated. `error` may be NULL; otherwise it receives a short reason. */
 bool snesrecomp_ppu_trace_read(const char *path, SnesPpuTrace *out,
                                char *error, size_t error_bytes);
+
+bool snesrecomp_ppu_trace_write_job(const char *path,const SnesRecompPpuJob *job,
+    uint32_t frame_id,uint32_t accepted,uint32_t reject_reason);
+/* Also reads older v2-v5 captures into empty post jobs, subject to their
+ * existing incomplete-memory restrictions. On success the trace and job have
+ * independent ownership; release either first. Failure zeroes both outputs. */
+bool snesrecomp_ppu_trace_read_job(const char *path,SnesPpuTrace *out,
+    SnesRecompPpuJob **job,char *error,size_t error_bytes);
 
 void snesrecomp_ppu_trace_free(SnesPpuTrace *trace);
 

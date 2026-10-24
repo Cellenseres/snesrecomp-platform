@@ -31,6 +31,15 @@ typedef struct SnesRecompPresenterOps {
     unsigned (*get_display_millihertz)(SnesRecompPresenter *presenter);
     /* Optional; appended to preserve existing backend initializers. */
     bool (*set_vsync)(SnesRecompPresenter *presenter, bool enabled);
+    uint32_t (*ppu_capabilities)(const SnesRecompPresenter *presenter);
+    SnesRecompPpuResult (*ppu_prepare)(SnesRecompPresenter *presenter,
+                                      const SnesRecompPpuFrame *frame);
+    SnesRecompPpuResult (*ppu_submit)(SnesRecompPresenter *presenter);
+    void (*ppu_cancel)(SnesRecompPresenter *presenter);
+    SnesRecompPpuResult (*ppu_prepare_job)(SnesRecompPresenter *presenter,
+                                         const SnesRecompPpuJob *job);
+    bool (*present_blits)(SnesRecompPresenter *presenter,
+        const SnesRecompVideoFrame *base, const SnesRecompBlitPlan *plan);
 } SnesRecompPresenterOps;
 
 struct SnesRecompPresenter {
@@ -48,6 +57,9 @@ struct SnesRecompPresenter {
     /* Mask of 1u << scale. Appended so existing offsets do not move; zero
      * keeps the earlier 2x-only contract. */
     uint32_t mode7_scales;
+    const SnesRecompPpuFrame *ppu_pending;
+    SnesRecompPpuStats ppu_stats;
+    const SnesRecompPpuJob *ppu_pending_job;
 };
 
 int snesrecomp_presenter_display_width(

@@ -86,7 +86,7 @@ static bool BgResourcesEqual(const SnesPpuBgState *a,
            a->big_tiles == b->big_tiles && a->bpp == b->bpp &&
            a->margin_left == b->margin_left &&
            a->margin_right == b->margin_right &&
-           a->margin_repeats == b->margin_repeats;
+           a->margin_repeats == b->margin_repeats && !a->elastic_count && !b->elastic_count;
 }
 
 const char *snes_ppu_unsupported_text(SnesPpuUnsupported reason) {
@@ -122,6 +122,7 @@ SnesPpuUnsupported snesrecomp_ppu_phase1_supports(
         return SNES_PPU_UNSUPPORTED_RASTER_STATE;
     if (cap->raster_memory_flags)
         return SNES_PPU_UNSUPPORTED_RASTER_MEMORY;
+    if(cap->resolved_windows) return SNES_PPU_UNSUPPORTED_WINDOWS;
     /* The HUD split and OAM hint policies also reshape composition and window
      * extents for frames with no sprites at all, so they are checked once for
      * the whole capture rather than only where OBJ is enabled. */
@@ -183,6 +184,8 @@ SnesPpuUnsupported snesrecomp_ppu_phase1_supports(
         for (unsigned bg = 0; bg < 3; bg++) {
             if (!(on & (1u << bg)))
                 continue;
+            if (b->bg[bg].elastic_count)
+                return SNES_PPU_UNSUPPORTED_LAYOUT_POLICY;
             if (b->bg[bg].big_tiles)
                 return SNES_PPU_UNSUPPORTED_BIG_TILES;
             if (b->bg[bg].bpp != (bg == 2u ? 2u : 4u))
