@@ -30,6 +30,78 @@ static bool apu_program_take_over(Apu *apu) {
   return true;
 }
 
+/* Advances idle cycles as one step; 0 when the next is an event.
+ * Stops before every port write, sample, counter tick, opcode and
+ * program access, so the stepped cycles match apu_cycle exactly. */
+static uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles) {
+  const SnesRecompApuProgram *program = s_apu_program;
+  if (apu->portClock >= target)
+    return 0;
+  const bool native = program && program->active(program->context, apu);
+  uint32_t idle;
+  if (native) {
+    if (!program->idle || s_apu_program_poked)
+      return 0;
+    idle = program->idle(program->context, apu);
+  } else {
+    /* The SPC-700 only acts when its next opcode is due. */
+    idle = apu->cpuCyclesLeft;
+  }
+
+  uint64_t span = target - apu->portClock;
+  if (span > max_cycles)
+    span = max_cycles;
+  if (apu->portQHead != apu->portQTail) {
+    const uint64_t at = apu->portQueue[apu->portQHead & (APU_PORT_QUEUE_LEN - 1)].target_cycle;
+    if (at <= apu->portClock)
+      return 0;
+    if (at - apu->portClock < span)
+      span = at - apu->portClock;
+  }
+  const uint32_t sample = (32u - (apu->cycles & 0x1f)) & 0x1f;
+  if (span > sample)
+    span = sample;
+  if (span > idle)
+    span = idle;
+  for (int i = 0; i < 3; i++) {
+    if (!apu->timer[i].enabled)
+      continue;
+    const uint32_t period = i == 2 ? 16 : 128;
+    uint32_t reloads = (uint8_t)(apu->timer[i].target - apu->timer[i].divider);
+    if (reloads == 0)
+      reloads = 256;
+    const uint32_t tick = apu->timer[i].cycles + (reloads - 1) * period;
+    if (span > tick)
+      span = tick;
+  }
+  if (span == 0)
+    return 0;
+
+  const uint32_t n = (uint32_t)span;
+  for (int i = 0; i < 3; i++) {
+    const uint32_t period = i == 2 ? 16 : 128;
+    const uint32_t left = apu->timer[i].cycles;
+    const uint32_t reloads = n > left ? (n - 1 - left) / period + 1 : 0;
+    apu->timer[i].cycles = (uint8_t)(left + reloads * period - n);
+    if (apu->timer[i].enabled)
+      apu->timer[i].divider = (uint8_t)(apu->timer[i].divider + reloads);
+  }
+  if (!native)
+    apu->cpuCyclesLeft = (uint8_t)(apu->cpuCyclesLeft - n);
+  /* The last idle cycle still reports its clock. */
+  apu->cycles += n - 1;
+  apu->portClock += n - 1;
+  if (native && program->cycle)
+    program->cycle(program->context, apu);
+  apu->cycles++;
+  apu->portClock++;
+  return n;
+}
+
+uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles) {
+  return cycles ? apu_program_skip(apu, apu->portClock + cycles, cycles) : 0;
+}
+
 /* apu_cycle with the native program instead of the SPC-700. */
 static bool apu_program_cycle(Apu *apu) {
   const SnesRecompApuProgram *program = s_apu_program;

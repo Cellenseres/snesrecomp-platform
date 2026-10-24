@@ -15,12 +15,27 @@ function(_snesrecomp_apu_program_edit text_var old new)
     set(${text_var} "${_text}" PARENT_SCOPE)
 endfunction()
 
+# Batches idle cycles in snes_catchupApu's relative catch-up loop.
+# Applies only after the APU program overlay; the caller owns snes.c.
+function(snesrecomp_platform_patch_apu_catchup text_var)
+    get_property(_overlay GLOBAL PROPERTY SNESRECOMP_PLATFORM_APU_PROGRAM_OVERLAY)
+    if(NOT _overlay)
+        return()
+    endif()
+    set(_text "${${text_var}}")
+    _snesrecomp_apu_program_edit(_text
+        "  for(int i = 0; i < catchupCycles; i++) {\n    apu_cycle(snes->apu);\n  }\n"
+        "  extern uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles);\n  for(int i = 0; i < catchupCycles;) {\n    const uint32_t idle = snesrecomp_apu_program_skip(snes->apu, (uint32_t)(catchupCycles - i));\n    if (idle) {\n      i += (int)idle;\n      continue;\n    }\n    apu_cycle(snes->apu);\n    i++;\n  }\n")
+    set(${text_var} "${_text}" PARENT_SCOPE)
+endfunction()
+
 # Lets a native program replace the interpreted SPC-700 (see
 # include/snesrecomp_platform/apu_program.h). The APU clock, port queue,
 # timers and S-DSP of the pinned core stay; the fetched tree is not modified.
 #
 # Owns apu.c: no other overlay may replace apu.c in the same source list.
 function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
+    set_property(GLOBAL PROPERTY SNESRECOMP_PLATFORM_APU_PROGRAM_OVERLAY ON)
     set(_original "${snesrecomp_root}/runner/src/snes/apu.c")
     set(_sources "${${sources_var}}")
     list(FIND _sources "${_original}" _index)
@@ -40,7 +55,7 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
     set(_platform "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/..")
     _snesrecomp_apu_program_edit(_text
         "#include \"../audio_trace.h\"\n"
-        "#include \"../audio_trace.h\"\n\nstatic bool apu_program_cycle(Apu *apu);\nstatic bool apu_program_take_over(Apu *apu);\nstatic void apu_program_poke(void);\nstatic void apu_program_saveload(Apu *apu, SaveLoadInfo *sli);\n")
+        "#include \"../audio_trace.h\"\n\nstatic bool apu_program_cycle(Apu *apu);\nstatic bool apu_program_take_over(Apu *apu);\nstatic void apu_program_poke(void);\nstatic void apu_program_saveload(Apu *apu, SaveLoadInfo *sli);\nstatic uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles);\n")
     _snesrecomp_apu_program_edit(_text
         "  spc_saveload(apu->spc, sli);\n}\n"
         "  spc_saveload(apu->spc, sli);\n  apu_program_saveload(apu, sli);\n}\n")
@@ -53,6 +68,27 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
     _snesrecomp_apu_program_edit(_text
         "    apu->cpuCyclesLeft = spc_runOpcode(apu->spc);\n"
         "    apu->cpuCyclesLeft = apu_program_take_over(apu) ? 1 : spc_runOpcode(apu->spc);\n")
+    _snesrecomp_apu_program_edit(_text
+        "    if (apu->portClock >= target && !due_event)\n      return true;\n    if (max_cycles-- == 0)\n      return false;\n    apu_cycle(apu);\n"
+        "    if (apu->portClock >= target && !due_event)\n      return true;\n    if (max_cycles == 0)\n      return false;\n    {\n      const uint32_t idle = apu_program_skip(apu, target, max_cycles);\n      max_cycles -= idle;\n      if (idle)\n        continue;\n    }\n    max_cycles--;\n    apu_cycle(apu);\n")
+
+    # Compose audio coherence into this sole owner of apu.c. Never apply a
+    # second APU overlay to the already-generated translation unit. The
+    # default native-SPC/CPU synthesis build remains byte-for-byte unchanged.
+    if(SNESRECOMP_PLATFORM_SNES_DSP_BRIDGE)
+        _snesrecomp_apu_program_edit(_text
+            "#include \"../audio_trace.h\"\n"
+            "#include \"../audio_trace.h\"\n#include \"snesrecomp_platform/snes_dsp_bridge.h\"\n")
+        _snesrecomp_apu_program_edit(_text
+            "void apu_saveload(Apu *apu, SaveLoadInfo *sli) {\n"
+            "void apu_saveload(Apu *apu, SaveLoadInfo *sli) {\n  snesrecomp_dsp_bridge_before_saveload(apu->dsp);\n")
+        _snesrecomp_apu_program_edit(_text
+            "  return apu->ram[adr];\n"
+            "  snesrecomp_dsp_bridge_before_read(apu->dsp);\n  return apu->ram[adr];\n")
+        _snesrecomp_apu_program_edit(_text
+            "  apu->ram[adr] = val;\n"
+            "  apu->ram[adr] = val;\n  snesrecomp_dsp_bridge_aram_written(apu->dsp, adr, 1);\n")
+    endif()
     string(APPEND _text "\n#include \"${_platform}/src/apu_program.inc\"\n")
 
     set(_directory "${CMAKE_BINARY_DIR}/generated/apu-program")

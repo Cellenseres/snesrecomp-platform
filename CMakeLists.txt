@@ -4,6 +4,32 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(snesrecomp_platform C)
 endif()
 
+option(SNESRECOMP_PLATFORM_AUDIO_ONLY
+    "Configure only the portable S-DSP targets, without SDL or a console SDK" OFF)
+
+add_library(snesrecomp_platform_snes_dsp STATIC
+    src/snes_dsp_core.c
+    src/snes_dsp_wire.c
+    src/snes_dsp_engine.c
+    src/snes_dsp_host.c
+    src/snes_dsp_stream_host.c
+)
+add_library(snesrecomp::snes_dsp ALIAS snesrecomp_platform_snes_dsp)
+target_compile_features(snesrecomp_platform_snes_dsp PUBLIC c_std_11)
+target_include_directories(snesrecomp_platform_snes_dsp PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+set_target_properties(snesrecomp_platform_snes_dsp PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+if(SNESRECOMP_PLATFORM_REQUIRE_INT_ENUMS)
+    # This API uses fixed-width fields; do not propagate game enum ABI into
+    # the separate libctru boundary compiled with SDK short enums.
+    target_compile_options(snesrecomp_platform_snes_dsp PRIVATE -fno-short-enums)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/SnesRecompPlatformSnesDsp.cmake")
+if(SNESRECOMP_PLATFORM_AUDIO_ONLY)
+    return()
+endif()
+
 option(SNESRECOMP_PLATFORM_ENABLE_SDL "Build SDL presentation and workers" ON)
 if(SNESRECOMP_PLATFORM_ENABLE_SDL AND NOT TARGET SDL3::SDL3)
     find_package(SDL3 CONFIG REQUIRED)
