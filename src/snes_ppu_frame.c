@@ -154,7 +154,14 @@ static SnesRecompPpuResult Validate(const SnesPpuFrameCapture *c,
             uint64_t occupied=0;
             unsigned x=0;
             for (;x+8u<=c->canvas_width;x+=8) {
-                uint32_t pairs[4];memcpy(pairs,row+x,sizeof(pairs));
+                uint32_t pairs[4];
+#if defined(__arm__) && (defined(__GNUC__) || defined(__clang__))
+                if(!((uintptr_t)(row+x)&3u)) {
+                    const void *aligned=__builtin_assume_aligned(row+x,4);
+                    memcpy(pairs,aligned,sizeof pairs);
+                } else
+#endif
+                    memcpy(pairs,row+x,sizeof pairs);
                 /* Transparent capture groups are already canonical zeroes.
                  * They need neither palette qualification nor coverage work;
                  * nonzero transparent values still take the full validator. */

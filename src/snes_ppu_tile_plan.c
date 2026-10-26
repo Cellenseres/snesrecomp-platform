@@ -453,23 +453,25 @@ SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample(const SnesPpuFrameCapture 
     const unsigned count=snesrecomp_ppu_window_spans(cap,band,spans,SNESRECOMP_WINDOW_MAX_SPANS);
     return snesrecomp_ppu_mode1_layer_sample_windows(cap,band,spans,count,layer,sub,x,y,opaque,priority);
 }
-SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample_windows(const SnesPpuFrameCapture *cap,
+static SnesRecompPpuResult LayerScreens(const SnesPpuFrameCapture *cap,
     const SnesPpuRasterBand *band,const SnesRecompWindowSpan *spans,unsigned count,
-    uint8_t layer,bool sub,uint16_t x,uint16_t y,bool *opaque,uint8_t *priority) {
-    if(!cap || !band || !opaque || !priority || !cap->vram || layer>=3 ||
+    uint8_t layer,uint8_t screens,uint16_t x,uint16_t y,bool *opaque,uint8_t *priority,uint8_t *opaque_screens) {
+    if(!cap || !band || !opaque || !priority || !opaque_screens || !cap->vram || layer>=3 ||
         x>=cap->canvas_width || y>=cap->visible_height || y<band->y_begin || y>=band->y_end)
         return SNESRECOMP_PPU_INVALID;
     if(band->bg_mode!=1 || band->bg[layer].elastic_count || band->bg[layer].margin_repeats ||
         (cap->layout.layer_mirror&(1u<<layer))) return SNESRECOMP_PPU_UNSUPPORTED;
-    *opaque=false;*priority=0;
-    if(band->forced_blank || !((sub?band->sub_enable:band->main_enable)&(1u<<layer))) return SNESRECOMP_PPU_OK;
+    *opaque=false;*priority=0;*opaque_screens=0;
+    uint8_t active=(uint8_t)(screens&(((band->main_enable>>layer)&1u)|(((band->sub_enable>>layer)&1u)<<1)));
+    if(band->forced_blank || !active) return SNESRECOMP_PPU_OK;
     const SnesPpuBgState *bg=band->bg+layer;
     const int screen=(int)x-cap->canvas_extra;
     if(screen<-(int)bg->margin_left || screen>=256+bg->margin_right) return SNESRECOMP_PPU_OK;
     if(!spans || !count || count>SNESRECOMP_WINDOW_MAX_SPANS) return SNESRECOMP_PPU_INVALID;
     const SnesRecompWindowSpan *span=SampleSpan(spans,count,x);
     if(!span) return SNESRECOMP_PPU_INVALID;
-    if(!(span->mask&(1u<<(layer+(sub?3u:0u))))) return SNESRECOMP_PPU_OK;
+    active&=(uint8_t)(((span->mask>>layer)&1u)|(((span->mask>>(layer+3u))&1u)<<1));
+    if(!active) return SNESRECOMP_PPU_OK;
     const unsigned shift=bg->big_tiles?4u:3u,mask=bg->big_tiles?1023u:511u;
     const unsigned sx=(unsigned)(screen+bg->h_scroll)&mask,sy=(y+1u+bg->v_scroll)&mask;
     const uint16_t entry=Entry(cap,bg,layer,sx>>shift,sy>>shift);
@@ -483,8 +485,21 @@ SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample_windows(const SnesPpuFrame
         const unsigned word=(bg->char_word_addr+character*bg->bpp*4u+row+(plane/2u)*8u)&32767u;
         index|=((cap->vram[word]>>(7u-col+(plane%2u)*8u))&1u)<<plane;
     }
-    *opaque=index!=0;*priority=(uint8_t)((entry>>13)&1u);return SNESRECOMP_PPU_OK;
+    *opaque=index!=0;*opaque_screens=index?active:0;*priority=(uint8_t)((entry>>13)&1u);return SNESRECOMP_PPU_OK;
 }
+SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample_windows(const SnesPpuFrameCapture *cap,
+    const SnesPpuRasterBand *band,const SnesRecompWindowSpan *spans,unsigned count,
+    uint8_t layer,bool sub,uint16_t x,uint16_t y,bool *opaque,uint8_t *priority) {
+    uint8_t screens;
+    return LayerScreens(cap,band,spans,count,layer,(uint8_t)(sub?2u:1u),x,y,opaque,priority,&screens);
+}
+SnesRecompPpuResult snesrecomp_ppu_mode1_layer_screens_windows(const SnesPpuFrameCapture *cap,
+    const SnesPpuRasterBand *band,const SnesRecompWindowSpan *spans,unsigned count,
+    uint8_t layer,uint16_t x,uint16_t y,uint8_t *opaque_screens,uint8_t *priority) {
+    bool opaque;
+    return LayerScreens(cap,band,spans,count,layer,3u,x,y,&opaque,priority,opaque_screens);
+}
+
 
 static SnesRecompPpuResult Mode1Sample(const SnesRecompPpuFrame *frame,
     uint16_t x,uint16_t y,uint32_t *argb,uint16_t *sub_colour,bool *genuine_sub) {

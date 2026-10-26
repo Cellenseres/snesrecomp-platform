@@ -74,6 +74,12 @@ SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample(const SnesPpuFrameCapture 
 SnesRecompPpuResult snesrecomp_ppu_mode1_layer_sample_windows(const SnesPpuFrameCapture *capture,
     const SnesPpuRasterBand *band, const SnesRecompWindowSpan *windows, unsigned window_count,
     uint8_t layer, bool sub, uint16_t x, uint16_t y, bool *opaque, uint8_t *priority);
+/* Sample the same BG coordinate once for both screens. Opaque bits are 1
+ * for main and 2 for sub; priority is meaningful only for those set bits.
+ * Enable/window decisions remain independent. No persistent cache or mutation. */
+SnesRecompPpuResult snesrecomp_ppu_mode1_layer_screens_windows(const SnesPpuFrameCapture *capture,
+    const SnesPpuRasterBand *band, const SnesRecompWindowSpan *windows, unsigned window_count,
+    uint8_t layer, uint16_t x, uint16_t y, uint8_t *opaque_screens, uint8_t *priority);
 /* Shared exact backdrop/qualified-OBJ plan for the separate Mode 7 layer.
  * It does not claim that a background has been drawn or omitted safely. */
 SnesRecompPpuResult snesrecomp_ppu_mode7_colour_plan(SnesRecompColourTileCache *cache,

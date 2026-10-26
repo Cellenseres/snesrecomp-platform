@@ -159,6 +159,17 @@ boundaries. The native APU-program idle callback is optional and cannot cross
 port, timer, DSP-sample or program-access events. These interfaces do not supply
 an OpenDSP firmware or enable any console backend automatically.
 
+`SnesRecompPlatformApuClock.cmake` composes the exact reduced frame-clock
+conversion after the current `common_rtl.c` owner. It is usable with a native
+APU program independently of interpreted SPC event batching. Both standard and
+extended clock callers are patched in generated copies; their compiler and
+include contracts are preserved.
+
+Mode-1 callers can sample main/sub-screen layer visibility together with
+`snesrecomp_ppu_mode1_layer_screens_windows`. Each screen keeps its own enable
+and window decision while sharing tile decoding. The opaque-screen mask, rather
+than an unconditional priority value, determines which results are usable.
+
 ## Tests
 
 Configure with `SNESRECOMP_PLATFORM_BUILD_TESTS=ON` to build the SDL/OpenGL
