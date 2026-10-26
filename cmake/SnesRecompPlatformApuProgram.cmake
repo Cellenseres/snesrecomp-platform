@@ -70,7 +70,7 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
         "    apu->cpuCyclesLeft = apu_program_take_over(apu) ? 1 : spc_runOpcode(apu->spc);\n")
     _snesrecomp_apu_program_edit(_text
         "    if (apu->portClock >= target && !due_event)\n      return true;\n    if (max_cycles-- == 0)\n      return false;\n    apu_cycle(apu);\n"
-        "    if (apu->portClock >= target && !due_event)\n      return true;\n    if (max_cycles == 0)\n      return false;\n    {\n      const uint32_t idle = apu_program_skip(apu, target, max_cycles);\n      max_cycles -= idle;\n      if (idle)\n        continue;\n    }\n    max_cycles--;\n    apu_cycle(apu);\n")
+        "    if (apu->portClock >= target && !due_event)\n      return true;\n    if (max_cycles == 0)\n      return false;\n    /* A one-cycle request cannot amortize idle-span discovery. The exact\n     * cycle routine already handles its ports, counters, native program and\n     * DSP boundary. Larger requests retain the certified idle batching. */\n    if (max_cycles > 1u && target > apu->portClock && target - apu->portClock > 1u) {\n      const uint32_t idle = apu_program_skip(apu, target, max_cycles);\n      max_cycles -= idle;\n      if (idle)\n        continue;\n    }\n    max_cycles--;\n    apu_cycle(apu);\n")
 
     # Compose audio coherence into this sole owner of apu.c. Never apply a
     # second APU overlay to the already-generated translation unit. The
