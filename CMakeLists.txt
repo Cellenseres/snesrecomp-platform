@@ -38,6 +38,7 @@ endif()
 add_library(snesrecomp_platform_runtime STATIC
     src/runtime_policy.c
     src/sha1.c
+    src/sha256.c
     src/rom_verify.c
     src/msu_pack.c
     src/margin_pack.c
