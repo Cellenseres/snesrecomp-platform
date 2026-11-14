@@ -14,6 +14,13 @@ extern "C" {
 
 struct Apu;
 
+enum {
+    /* Opt-in: active stays true and cycle only records the clock throughout
+     * idle(), including executed DSP samples. No DSP-feedback-dependent owner
+     * change or program access is allowed. Default zero retains sample cuts. */
+    SNESRECOMP_APU_IDLE_STABLE_DSP = 1u << 0
+};
+
 typedef struct SnesRecompApuProgram {
     void *context;
     /* At an interpreted opcode boundary: true takes over. */
@@ -33,6 +40,11 @@ typedef struct SnesRecompApuProgram {
 
 /* NULL restores interpretation. Call before the APU runs. */
 void snesrecomp_apu_set_program(const SnesRecompApuProgram *program);
+/* Additive opt-in, preserving the original program structure and default
+ * sample boundaries. Unknown capabilities or NULL with nonzero capabilities
+ * fail before changing the program. Same ownership/lifecycle as set_program. */
+bool snesrecomp_apu_set_program_with_capabilities(
+    const SnesRecompApuProgram *program, uint32_t capabilities);
 
 /* True when the overlay is compiled in. */
 bool snesrecomp_apu_program_supported(void);

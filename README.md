@@ -156,7 +156,9 @@ New operations are appended and omitted operations stay unavailable.
 Source adapters under `cmake` operate on reviewed immutable build-tree copies.
 The eventless beam certificate excludes IRQ, line/HBlank and automatic-pad
 boundaries. The native APU-program idle callback is optional and cannot cross
-port, timer, DSP-sample or program-access events. These interfaces do not supply
+port, timer or program-access events. By default it also stops at DSP samples.
+The optional `SNESRECOMP_APU_IDLE_STABLE_DSP` capability groups idle scheduling
+while still executing every sample and echo write in order. These interfaces do not supply
 an OpenDSP firmware or enable any console backend automatically.
 
 `SnesRecompPlatformApuClock.cmake` composes the exact reduced frame-clock

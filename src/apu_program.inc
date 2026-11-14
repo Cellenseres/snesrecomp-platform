@@ -4,10 +4,21 @@
 
 static const SnesRecompApuProgram *s_apu_program;
 static bool s_apu_program_poked;
+static uint32_t s_apu_program_capabilities;
 
 void snesrecomp_apu_set_program(const SnesRecompApuProgram *program) {
   s_apu_program = program;
+  s_apu_program_capabilities = 0;
   s_apu_program_poked = false;
+}
+
+bool snesrecomp_apu_set_program_with_capabilities(
+    const SnesRecompApuProgram *program, uint32_t capabilities) {
+  if ((capabilities & ~SNESRECOMP_APU_IDLE_STABLE_DSP) || (!program && capabilities))
+    return false;
+  snesrecomp_apu_set_program(program);
+  s_apu_program_capabilities = capabilities;
+  return true;
 }
 
 bool snesrecomp_apu_program_supported(void) { return true; }
@@ -30,14 +41,16 @@ static bool apu_program_take_over(Apu *apu) {
   return true;
 }
 
-/* Advances idle cycles as one step; 0 when the next is an event.
- * Stops before every port write, sample, counter tick, opcode and
- * program access, so the stepped cycles match apu_cycle exactly. */
+/* Advances program-idle cycles; 0 when the next is an observable event.
+ * Stops before every port write, counter tick, opcode and program access.
+ * Native idle batches still execute every exact S-DSP sample. */
 static uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles) {
   const SnesRecompApuProgram *program = s_apu_program;
   if (apu->portClock >= target)
     return 0;
   const bool native = program && program->active(program->context, apu);
+  const bool batch_samples = native &&
+      (s_apu_program_capabilities & SNESRECOMP_APU_IDLE_STABLE_DSP) != 0;
   uint32_t idle;
   if (native) {
     if (!program->idle || s_apu_program_poked)
@@ -59,7 +72,11 @@ static uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles)
       span = at - apu->portClock;
   }
   const uint32_t sample = (32u - (apu->cycles & 0x1f)) & 0x1f;
-  if (span > sample)
+  /* A certified native idle interval has no program/port/timer event. Its
+   * S-DSP samples still run at every exact boundary below, without repeating
+   * the scheduler's active/idle/queue/limit discovery for each sample. An
+   * interpreted opcode has no such contract and retains the old sample cut. */
+  if (!batch_samples && span > sample)
     span = sample;
   if (span > idle)
     span = idle;
@@ -77,7 +94,37 @@ static uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles)
   if (span == 0)
     return 0;
 
+  /* Bound service latency and offset arithmetic even for UINT32_MAX requests. */
+  if (batch_samples && span > 1024u) span = 1024u;
   const uint32_t n = (uint32_t)span;
+  /* No sample or timer-phase edge can occur in this short native idle.
+   * Preserve the original final clock callback without general reload math. */
+  if (batch_samples && n <= sample && n <= apu->timer[0].cycles &&
+      n <= apu->timer[1].cycles && n <= apu->timer[2].cycles) {
+    apu->timer[0].cycles = (uint8_t)(apu->timer[0].cycles - n);
+    apu->timer[1].cycles = (uint8_t)(apu->timer[1].cycles - n);
+    apu->timer[2].cycles = (uint8_t)(apu->timer[2].cycles - n);
+    apu->cycles += n - 1;
+    apu->portClock += n - 1;
+    if (program->cycle) program->cycle(program->context, apu);
+    ++apu->cycles;
+    ++apu->portClock;
+    return n;
+  }
+  if (batch_samples) {
+    const uint32_t first_cycle=apu->cycles;
+    const uint64_t first_clock=apu->portClock;
+    /* Native idle promises that cycle only records the clock throughout this
+     * interval. No timer counter, queued access or CPU-port event is crossed.
+     * S-DSP consumes ARAM/registers, not the SPC's timer-divider scratch. All
+     * samples, echo writes and backend events retain their original order. */
+    for(uint32_t offset=sample;offset<n;offset+=32u) {
+      apu->cycles=first_cycle+offset;apu->portClock=first_clock+offset;
+      if(program->cycle)program->cycle(program->context,apu);
+      dsp_cycle(apu->dsp);
+    }
+    apu->cycles=first_cycle;apu->portClock=first_clock;
+  }
   for (int i = 0; i < 3; i++) {
     const uint32_t period = i == 2 ? 16 : 128;
     const uint32_t left = apu->timer[i].cycles;
