@@ -5,8 +5,10 @@
 static const SnesRecompApuProgram *s_apu_program;
 static bool s_apu_program_poked;
 static uint32_t s_apu_program_capabilities;
+#include "apu_cpu_span.inc"
 
 void snesrecomp_apu_set_program(const SnesRecompApuProgram *program) {
+  apu_program_span_before_access(NULL);
   s_apu_program = program;
   s_apu_program_capabilities = 0;
   s_apu_program_poked = false;
@@ -14,8 +16,13 @@ void snesrecomp_apu_set_program(const SnesRecompApuProgram *program) {
 
 bool snesrecomp_apu_set_program_with_capabilities(
     const SnesRecompApuProgram *program, uint32_t capabilities) {
-  if ((capabilities & ~SNESRECOMP_APU_IDLE_STABLE_DSP) || (!program && capabilities))
-    return false;
+  uint32_t supported=SNESRECOMP_APU_IDLE_STABLE_DSP;
+#if defined(SNESRECOMP_PLATFORM_APU_CPU_SPANS)
+  supported|=SNESRECOMP_APU_CPU_INDEPENDENT;
+#endif
+  if ((capabilities & ~supported) || (!program && capabilities) ||
+      ((capabilities & SNESRECOMP_APU_CPU_INDEPENDENT) &&
+       !(capabilities & SNESRECOMP_APU_IDLE_STABLE_DSP))) return false;
   snesrecomp_apu_set_program(program);
   s_apu_program_capabilities = capabilities;
   return true;
@@ -146,6 +153,7 @@ static uint32_t apu_program_skip(Apu *apu, uint64_t target, uint32_t max_cycles)
 }
 
 uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles) {
+  apu_program_span_before_access(apu);
   return cycles ? apu_program_skip(apu, apu->portClock + cycles, cycles) : 0;
 }
 

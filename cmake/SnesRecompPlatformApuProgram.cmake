@@ -1,4 +1,5 @@
 include_guard(GLOBAL)
+option(SNESRECOMP_PLATFORM_APU_CPU_SPANS "Experimental certified CPU-only APU spans" OFF)
 
 # Replaces an anchor that must occur exactly once.
 function(_snesrecomp_apu_program_edit text_var old new)
@@ -26,7 +27,48 @@ function(snesrecomp_platform_patch_apu_catchup text_var)
     _snesrecomp_apu_program_edit(_text
         "  for(int i = 0; i < catchupCycles; i++) {\n    apu_cycle(snes->apu);\n  }\n"
         "  extern uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles);\n  for(int i = 0; i < catchupCycles;) {\n    const uint32_t idle = snesrecomp_apu_program_skip(snes->apu, (uint32_t)(catchupCycles - i));\n    if (idle) {\n      i += (int)idle;\n      continue;\n    }\n    apu_cycle(snes->apu);\n    i++;\n  }\n")
+    if(SNESRECOMP_PLATFORM_APU_CPU_SPANS)
+        _snesrecomp_apu_program_edit(_text
+            "  for(int i = 0; i < catchupCycles;) {\n"
+            "  extern uint32_t snesrecomp_apu_cpu_span_defer_cycles(Apu *,uint32_t);\n  const uint32_t deferred=snesrecomp_apu_cpu_span_defer_cycles(snes->apu,(uint32_t)catchupCycles);\n  for(int i = (int)deferred; i < catchupCycles;) {\n")
+    endif()
     set(${text_var} "${_text}" PARENT_SCOPE)
+endfunction()
+
+# Compose a getter into the currently selected trace owner. No assumed producer
+# value is used when deferred synthesis temporarily enters the CPU producer.
+function(_snesrecomp_apu_span_trace sources_var)
+    set(_result "")
+    set(_count 0)
+    foreach(_input IN LISTS ${sources_var})
+        get_filename_component(_name "${_input}" NAME)
+        if(NOT _name STREQUAL "audio_trace.c")
+            list(APPEND _result "${_input}")
+            continue()
+        endif()
+        file(READ "${_input}" _text)
+        string(REPLACE "\r\n" "\n" _text "${_text}")
+        _snesrecomp_apu_program_edit(_text
+            "void audio_trace_set_producer(int producer) {\n  s_producer = producer;\n}"
+            "void audio_trace_set_producer(int producer) {\n  s_producer = producer;\n}\nint snesrecomp_apu_span_trace_producer(void) { return s_producer; }")
+        set(_output "${CMAKE_BINARY_DIR}/generated/apu-cpu-span/audio_trace.c")
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/apu-cpu-span")
+        file(WRITE "${_output}" "${_text}")
+        foreach(_prop COMPILE_DEFINITIONS COMPILE_OPTIONS COMPILE_FLAGS INCLUDE_DIRECTORIES LANGUAGE)
+            get_source_file_property(_value "${_input}" "${_prop}")
+            if(NOT _value STREQUAL "NOTFOUND")
+                set_property(SOURCE "${_output}" PROPERTY "${_prop}" "${_value}")
+            endif()
+        endforeach()
+        get_filename_component(_include "${_input}" DIRECTORY)
+        set_property(SOURCE "${_output}" APPEND PROPERTY INCLUDE_DIRECTORIES "${_include}")
+        list(APPEND _result "${_output}")
+        math(EXPR _count "${_count}+1")
+    endforeach()
+    if(NOT _count EQUAL 1)
+        message(FATAL_ERROR "APU CPU spans require one reviewed audio trace owner")
+    endif()
+    set(${sources_var} "${_result}" PARENT_SCOPE)
 endfunction()
 
 # Lets a native program replace the interpreted SPC-700 (see
@@ -89,6 +131,40 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
             "  apu->ram[adr] = val;\n"
             "  apu->ram[adr] = val;\n  snesrecomp_dsp_bridge_aram_written(apu->dsp, adr, 1);\n")
     endif()
+    if(SNESRECOMP_PLATFORM_APU_CPU_SPANS)
+        _snesrecomp_apu_program_edit(_text "#include \"../audio_trace.h\"\n"
+            "#include \"../audio_trace.h\"\n#define SNESRECOMP_PLATFORM_APU_CPU_SPANS 1\nstatic void apu_program_span_before_access(const Apu *);\nstatic bool apu_program_span_target(Apu *,uint64_t,uint32_t);\n")
+        # Every public access which can expose or replace deferred state ends
+        # it BEFORE touching ports, RAM, timers, saved state or native callbacks.
+        foreach(_entry IN ITEMS
+            "void apu_free(Apu* apu) {"
+            "void apu_reset(Apu* apu) {"
+            "void apu_clearPortQueue(Apu* apu) {"
+            "void apu_writePortNow(Apu* apu, uint8_t port, uint8_t val) {"
+            "uint32_t apu_portQueueDepth(const Apu* apu) {"
+            "bool apu_runUntilPortQueueEmpty(Apu* apu, uint32_t max_cycles) {"
+            "void apu_port_sched_save(const Apu *apu, ApuPortSched *out) {"
+            "void apu_port_sched_restore(Apu *apu, const ApuPortSched *in) {"
+            "void apu_saveload(Apu *apu, SaveLoadInfo *sli) {"
+            "void apu_cycle(Apu* apu) {"
+            "uint8_t apu_cpuRead(Apu* apu, uint16_t adr) {"
+            "void apu_cpuWrite(Apu* apu, uint16_t adr, uint8_t val) {")
+            _snesrecomp_apu_program_edit(_text "${_entry}\n"
+                "${_entry}\n  apu_program_span_before_access(apu);\n")
+        endforeach()
+        _snesrecomp_apu_program_edit(_text
+            "                           uint64_t guest_cycle) {\n"
+            "                           uint64_t guest_cycle) {\n  apu_program_span_before_access(apu);\n")
+        _snesrecomp_apu_program_edit(_text
+            "                              uint8_t request_value, uint32_t max_cycles) {\n"
+            "                              uint8_t request_value, uint32_t max_cycles) {\n  apu_program_span_before_access(apu);\n")
+        _snesrecomp_apu_program_edit(_text
+            "                           uint32_t max_cycles) {\n  apu_writePortNow"
+            "                           uint32_t max_cycles) {\n  apu_program_span_before_access(apu);\n  apu_writePortNow")
+        _snesrecomp_apu_program_edit(_text
+            "  if (target < apu->portLastTarget)\n    target = apu->portLastTarget;\n\n  for (;;) {"
+            "  if (target < apu->portLastTarget)\n    target = apu->portLastTarget;\n  if (apu_program_span_target(apu,target,max_cycles)) return true;\n\n  for (;;) {")
+    endif()
     string(APPEND _text "\n#include \"${_platform}/src/apu_program.inc\"\n")
 
     set(_directory "${CMAKE_BINARY_DIR}/generated/apu-program")
@@ -96,7 +172,7 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
     file(MAKE_DIRECTORY "${_directory}")
     file(WRITE "${_overlay}" "${_text}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        "${_original}" "${_platform}/src/apu_program.inc")
+        "${_original}" "${_platform}/src/apu_program.inc" "${_platform}/src/apu_cpu_span.inc")
 
     list(REMOVE_AT _sources ${_index})
     list(INSERT _sources ${_index} "${_overlay}")
@@ -109,5 +185,8 @@ function(snesrecomp_platform_overlay_apu_program sources_var snesrecomp_root)
     endforeach()
     set_property(SOURCE "${_overlay}" APPEND PROPERTY INCLUDE_DIRECTORIES
         "${snesrecomp_root}/runner/src/snes;${snesrecomp_root}/runner/src;${_platform}/include")
+    if(SNESRECOMP_PLATFORM_APU_CPU_SPANS)
+        _snesrecomp_apu_span_trace(_sources)
+    endif()
     set(${sources_var} "${_sources}" PARENT_SCOPE)
 endfunction()
