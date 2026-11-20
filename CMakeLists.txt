@@ -79,6 +79,7 @@ add_library(snesrecomp_ppu STATIC
     src/snes_ppu_obj_run.c
     src/snes_ppu_trace.c
     src/snes_ppu_frame.c
+    src/snes_ppu_frame_key.c
     src/snes_ppu_job.c
     src/snes_ppu_primitive_colour.c
     src/snes_ppu_index_delta.c
@@ -91,6 +92,7 @@ add_library(snesrecomp_ppu STATIC
     src/snes_ppu_tile_plan.c
     src/snes_ppu_raw_plan.c
     src/snes_ppu_obj_geometry.c
+    src/snes_ppu_obj_geometry_plan.c
     src/ppu_blit.c
     src/image_delta.c
 )

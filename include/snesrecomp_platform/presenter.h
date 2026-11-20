@@ -53,6 +53,7 @@ typedef struct SnesRecompPpuStats {
     uint32_t primitive_commands, primitive_commands_generated;
     uint32_t primitive_sources_reused, primitive_image_reused;
     uint32_t background_prefix_reused;
+    uint32_t obj_rows_reused, obj_rows_generated;
 } SnesRecompPpuStats;
 
 enum {

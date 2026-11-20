@@ -7,8 +7,12 @@
 extern "C" {
 #endif
 
-/* Exact content certificate for an already submitted primitive/indexed image. This
- * conservative variant accepts BG and qualified OBJ-capture primitives, no
+/* Exact content certificate for an already submitted logical image.
+ * Ordinary owned jobs certify the complete qualified pixel-plane frame, raster
+ * metadata, resolved maps/windows, image versions and source/overlay geometry.
+ * Their already-composited post images must be part of the retained target.
+ * The primitive/indexed
+ * variant accepts BG and qualified OBJ-capture primitives, no
  * resolved maps/windows and no post-images. Sliver-source primitives require
  * an additional sliver certificate and are deliberately excluded from the primitive
  * variant. Indexed jobs own exact geometry/material and qualified-sliver versions;

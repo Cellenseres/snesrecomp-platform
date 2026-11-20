@@ -156,9 +156,11 @@ New operations are appended and omitted operations stay unavailable.
 Source adapters under `cmake` operate on reviewed immutable build-tree copies.
 The eventless beam certificate excludes IRQ, line/HBlank and automatic-pad
 boundaries. The native APU-program idle callback is optional and cannot cross
-port, timer or program-access events. By default it also stops at DSP samples.
-The optional `SNESRECOMP_APU_IDLE_STABLE_DSP` capability groups idle scheduling
-while still executing every sample and echo write in order. These interfaces do not supply
+port, timer or program-access events. Existing programs also stop at each DSP
+sample. An explicit `SNESRECOMP_APU_IDLE_STABLE_DSP` capability permits grouping
+scheduler discovery across executed samples only while native ownership stays
+stable and the cycle callback only publishes the clock. Every sample, echo
+write and device event still executes in its original order. These interfaces do not supply
 an OpenDSP firmware or enable any console backend automatically.
 
 `SnesRecompPlatformApuClock.cmake` composes the exact reduced frame-clock
@@ -176,3 +178,8 @@ than an unconditional priority value, determines which results are usable.
 
 Configure with `SNESRECOMP_PLATFORM_BUILD_TESTS=ON` to build the SDL/OpenGL
 presenter smoke tests and the runtime-policy test.
+
+Owned PPU frames support transactional OBJ updates through
+`snesrecomp_ppu_frame_replace_objects`. Detached jobs can reuse a certified
+payload. Raw tile plans retain geometry while its native inputs and clipping
+match.

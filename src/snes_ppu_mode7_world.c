@@ -16,10 +16,11 @@ typedef struct Mode7PhaseEntry {
 
 struct SnesRecompMode7WorldCache {
     uint32_t pixels[2][SNESRECOMP_MODE7_WORLD_SIDE * SNESRECOMP_MODE7_WORLD_SIDE];
-    uint64_t versions[2][SNESRECOMP_MODE7_WORLD_CELLS], generation;
+    uint64_t versions[2][SNESRECOMP_MODE7_WORLD_CELLS], character_versions[2][256], generation;
     uint64_t resource_generation[2], geometry_generation;
     uint32_t characters[2][256][64];
     uint16_t previous_vram[SNESRECOMP_MODE7_WORLD_CELLS];
+    uint32_t character_colours[256][8]; /* Palette indices each character uses. */
     uint32_t colours[2][256];
     uint16_t previous_palette[256];
     uint32_t previous_policy;
@@ -38,12 +39,89 @@ struct SnesRecompMode7WorldCache {
     uint64_t visible_generation, resident_epoch, prepared_epoch, prepared_geometry;
     bool visible_raw;
     bool uniform_palette_certified;
+    SnesPpuRasterBand unshaded_bands[SNES_PPU_MAX_BANDS];
     uint16_t certified_palette_height;
     Mode7PhaseEntry phases[4096];
+    bool spans_screen;
+    uint32_t screen[2][SNESRECOMP_MODE7_SCREEN_WIDTH * SNESRECOMP_MODE7_SCREEN_HEIGHT];
+    uint64_t screen_versions[2][SNESRECOMP_MODE7_SCREEN_CELLS];
+    uint64_t screen_resource_generation[2], screen_geometry, screen_epoch;
+    SnesRecompMode7Line screen_lines[SNES_PPU_MAX_BANDS];
+    bool screen_valid;
 };
 
-static SnesRecompPpuResult CompileWorldSpans(const SnesRecompPpuFrame *,
+static SnesRecompPpuResult CompileWorldSpans(const SnesPpuFrameCapture *,
     const SnesRecompMode7WorldPlan *,SnesRecompMode7WorldSpan *,unsigned,unsigned *,Mode7PhaseEntry *);
+static SnesRecompPpuResult CachedSpans(SnesRecompMode7WorldCache *,const SnesPpuFrameCapture *,
+    const SnesRecompMode7WorldPlan *,SnesRecompMode7WorldGeometry *,bool);
+static unsigned FirstPendingBit(uint32_t bits);
+
+/* Exact GPU strips must keep the fractional sample range narrow. Steps that
+ * are not multiples of 32 cut each line into strips of a few pixels; a scaled
+ * world map while walking needs over 10000 strips. Such frames are sampled
+ * once on the CPU into a screen plane that the GPU reads 1:1. */
+enum { SCREEN_RASTER_MIN_LINES = 16 };
+static bool NeedsScreenRaster(const SnesPpuFrameCapture *cap,const SnesRecompMode7Line *lines) {
+    if(cap->canvas_width>SNESRECOMP_MODE7_SCREEN_WIDTH ||
+       cap->visible_height>SNESRECOMP_MODE7_SCREEN_HEIGHT) return false;
+    unsigned fractional=0;
+    for(unsigned bi=0;bi<cap->band_count;++bi) {
+        const SnesPpuRasterBand *b=cap->bands+bi;
+        if(b->forced_blank || !(b->main_enable&1u)) continue;
+        for(unsigned y=b->y_begin;y<b->y_end;++y)
+            if(((uint32_t)lines[y].step_x|(uint32_t)lines[y].step_y)&31u) ++fractional;
+    }
+    return fractional>=SCREEN_RASTER_MIN_LINES;
+}
+
+/* Samples exactly as the strip compiler does: 18-bit wrapped 8.8 positions,
+ * truncated to the texel. Characters are already coloured per variant. */
+static void RasterScreen(SnesRecompMode7WorldCache *cache,const SnesPpuFrameCapture *cap) {
+    /* A changed camera moves nearly every pixel, so per-pixel comparison
+     * would not save uploads; every covered cell is simply marked. */
+    uint32_t dirty[2][SNESRECOMP_MODE7_SCREEN_CELLS/32u]={{0}};
+    bool any[2]={false,false};
+    for(unsigned i=0;i<cache->span_count;++i) {
+        const SnesRecompMode7WorldSpan *s=cache->spans+i;
+        const unsigned variant=s->variant;
+        const SnesRecompMode7Line *line=cache->lines+s->y;
+        const uint32_t screen=(uint32_t)((int)s->x0-(int)cap->canvas_extra);
+        uint32_t px=line->start_x+(uint32_t)line->step_x*screen;
+        uint32_t py=line->start_y+(uint32_t)line->step_y*screen;
+        uint32_t *row=cache->screen[variant]+(unsigned)s->y*SNESRECOMP_MODE7_SCREEN_WIDTH;
+        const uint32_t (*characters)[64]=cache->characters[variant];
+        const uint32_t step_x=(uint32_t)line->step_x;
+        if(!line->step_y) {
+            const unsigned ty=(py&SNESRECOMP_MODE7_COORD_MASK)>>8;
+            const uint8_t *map_row=cache->map+(ty>>3)*128u;
+            const unsigned texel_row=(ty&7u)*8u;
+            for(unsigned x=s->x0;x<s->x1;++x) {
+                const unsigned tx=(px&SNESRECOMP_MODE7_COORD_MASK)>>8;
+                row[x]=characters[map_row[tx>>3]][texel_row+(tx&7u)];
+                px+=step_x;
+            }
+        } else {
+            const uint32_t step_y=(uint32_t)line->step_y;
+            for(unsigned x=s->x0;x<s->x1;++x) {
+                const unsigned tx=(px&SNESRECOMP_MODE7_COORD_MASK)>>8,ty=(py&SNESRECOMP_MODE7_COORD_MASK)>>8;
+                row[x]=characters[cache->map[(ty>>3)*128u+(tx>>3)]][(ty&7u)*8u+(tx&7u)];
+                px+=step_x;py+=step_y;
+            }
+        }
+        uint32_t *dirty_row=dirty[variant]+((unsigned)s->y>>3)*2u;
+        for(unsigned cell=s->x0>>3;cell<=((unsigned)s->x1-1u)>>3;++cell)
+            dirty_row[cell>>5]|=UINT32_C(1)<<(cell&31u);
+        any[variant]=true;
+    }
+    for(unsigned variant=0;variant<2;++variant) {
+        if(!any[variant]) continue;
+        const uint64_t generation=++cache->generation;
+        for(unsigned word=0;word<SNESRECOMP_MODE7_SCREEN_CELLS/32u;++word)
+            for(uint32_t bits=dirty[variant][word];bits;bits&=bits-1u)
+                cache->screen_versions[variant][word*32u+FirstPendingBit(bits)]=generation;
+        cache->screen_resource_generation[variant]=generation;
+    }
+}
 
 SnesRecompMode7WorldCache *snesrecomp_mode7_world_create(void) {
     return calloc(1, sizeof(SnesRecompMode7WorldCache));
@@ -81,11 +159,24 @@ static unsigned FirstPendingBit(uint32_t bits) {
 }
 
 static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
-    const SnesRecompPpuFrame *frame, SnesRecompMode7WorldPlan *out, bool raw, SnesRecompMode7WorldGeometry *view) {
+    const SnesRecompPpuFrame *frame, SnesRecompMode7WorldPlan *out, bool raw, SnesRecompMode7WorldGeometry *view,
+    bool unshaded) {
     if (!cache || !out) return SNESRECOMP_PPU_INVALID;
     memset(out, 0, sizeof(*out));
     const SnesPpuFrameCapture *cap = snesrecomp_ppu_frame_capture(frame);
-    if(!cap) return SNESRECOMP_PPU_INVALID;
+    if(!cap || cap->band_count>SNES_PPU_MAX_BANDS) return SNESRECOMP_PPU_INVALID;
+    /* A fade then keeps the same colours, cells and spans; the backend shades
+     * the finished picture with the one uniform brightness instead. */
+    SnesPpuFrameCapture full_brightness;
+    if(unshaded) {
+        memcpy(cache->unshaded_bands,cap->bands,cap->band_count*sizeof *cap->bands);
+        /* regs[0] is INIDISP; keep the raw copy consistent with the band. */
+        for(unsigned bi=0;bi<cap->band_count;++bi) {
+            cache->unshaded_bands[bi].brightness=15;
+            cache->unshaded_bands[bi].regs[0]=(uint8_t)(cache->unshaded_bands[bi].regs[0]|15u);
+        }
+        full_brightness=*cap;full_brightness.bands=cache->unshaded_bands;cap=&full_brightness;
+    }
     const SnesRecompPpuFrameVersions *versions=snesrecomp_ppu_frame_versions(frame);
     out->unsupported = snesrecomp_ppu_mode7_supports(cap);
     if (out->unsupported) return SNESRECOMP_PPU_UNSUPPORTED;
@@ -142,11 +233,13 @@ static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
     }
     if (!snesrecomp_ppu_mode7_compile_lines(cap, cache->lines, SNES_PPU_MAX_BANDS))
         return SNESRECOMP_PPU_INVALID;
+    /* The raw subscreen compositor keeps world strips; only this path is proven. */
+    const bool screen=view && !raw && NeedsScreenRaster(cap,cache->lines);
     if(view) {
         out->lines=cache->lines;out->pixels[0]=cache->pixels[0];
-        const SnesRecompPpuResult result=snesrecomp_mode7_world_cached_spans(cache,frame,out,view);
+        const SnesRecompPpuResult result=CachedSpans(cache,cap,out,view,screen);
         if(result!=SNESRECOMP_PPU_OK) return result;
-        if(cache->visible_generation!=view->generation || cache->visible_raw!=raw) {
+        if(!screen && (cache->visible_generation!=view->generation || cache->visible_raw!=raw)) {
             memset(cache->visible,0,sizeof cache->visible);
             for(unsigned i=0;i<view->count;++i) {
                 const SnesRecompMode7WorldSpan *span=view->spans+i;
@@ -169,35 +262,67 @@ static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
          snesrecomp_ppu_words_equal(cache->previous_vram,cap->vram,SNESRECOMP_MODE7_WORLD_CELLS)) &&
         !memcmp(cache->colours, colours, sizeof(colours))))) {
         ++cache->resident_epoch;
-        bool changed[2][256] = {{false}};
-        /* Rebuild only characters whose actual colour pixels changed. */
+        /* A palette fade usually changes some colours. Only characters using
+         * a changed index, or whose pixel bytes changed, need decoding; each
+         * gets one new version shared by all cells that show it. */
+        const bool cold = !cache->valid;
+        uint32_t new_colours[2][8] = {{0}};
+        for (unsigned variant = 0; variant < 2; ++variant)
+            for (unsigned i = 1; i < 256; ++i)
+                if (cold || colours[variant][i] != cache->colours[variant][i])
+                    new_colours[variant][i >> 5] |= UINT32_C(1) << (i & 31u);
+        const bool same_planes = !memcmp(colours[0], colours[1], sizeof colours[0]);
+        uint8_t changed[256] = {0}; /* Bit v: plane v of this character changed. */
         for (unsigned character = 0; character < 256; ++character) {
+            const uint16_t *now = cap->vram + character * 64, *before = cache->previous_vram + character * 64;
+            uint32_t *const uses = cache->character_colours[character];
+            bool new_source = cold;
+            for (unsigned p = 0; p < 64 && !new_source; ++p) new_source = (now[p] ^ before[p]) >= 256u;
+            if (new_source) {
+                memset(uses, 0, sizeof cache->character_colours[character]);
+                for (unsigned p = 0; p < 64; ++p) uses[now[p] >> 13] |= UINT32_C(1) << ((now[p] >> 8) & 31u);
+            }
             for (unsigned variant = 0; variant < 2; ++variant) {
-                uint32_t decoded[64];
-                for (unsigned p = 0; p < 64; ++p)
-                    decoded[p] = colours[variant][cap->vram[character * 64 + p] >> 8];
-                changed[variant][character] = !cache->valid ||
-                    memcmp(cache->characters[variant][character], decoded, sizeof(decoded));
-                if (changed[variant][character])
-                    memcpy(cache->characters[variant][character], decoded, sizeof(decoded));
+                bool recolour = new_source;
+                for (unsigned word = 0; word < 8 && !recolour; ++word) recolour = (uses[word] & new_colours[variant][word]) != 0;
+                if (!recolour) continue;
+                uint32_t *const stored = cache->characters[variant][character];
+                if (variant && same_planes && (changed[character] & 1u))
+                    memcpy(stored, cache->characters[0][character], 64 * sizeof *stored);
+                else for (unsigned p = 0; p < 64; ++p) stored[p] = colours[variant][now[p] >> 8];
+                cache->character_versions[variant][character] = cache->resource_generation[variant] = ++cache->generation;
+                changed[character] |= (uint8_t)(1u << variant);
             }
         }
-        for (unsigned cell = 0; cell < SNESRECOMP_MODE7_WORLD_CELLS; ++cell) {
-            const unsigned character = cap->vram[cell] & 255u;
-            for (unsigned variant = 0; variant < 2; ++variant) {
-                const bool cell_changed=!cache->valid || cache->map[cell]!=character || changed[variant][character];
-                if(!cell_changed && !(variant==1 && restore_plane_one)) continue;
-                const uint32_t bit=UINT32_C(1)<<(cell&31u);
-                if(!(cache->pending[variant][cell>>5]&bit)) ++cache->pending_count[variant];
-                cache->pending[variant][cell>>5]|=bit;
-                cache->resident[variant][cell>>5]&=~bit;
-                if(cell_changed) {
-                    cache->versions[variant][cell] = ++cache->generation;
-                    cache->resource_generation[variant] = cache->generation;
-                    ++out->changed_cells[variant];
+        /* Pending and residency change a word of 32 cells at a time. */
+        const uint16_t *const vram = cap->vram;
+        uint8_t *const map = cache->map;
+        for (unsigned word = 0; word < SNESRECOMP_MODE7_WORLD_CELLS / 32u; ++word) {
+            uint32_t dirty[2] = {0, 0};
+            for (unsigned bit = 0; bit < 32u; ++bit) {
+                const unsigned cell = word * 32u + bit, character = vram[cell] & 255u;
+                unsigned planes = changed[character];
+                if (cold) {
+                    planes = 3u;
+                    map[cell] = (uint8_t)character;
+                } else if (map[cell] != character) {
+                    planes = 3u;
+                    map[cell] = (uint8_t)character;
+                    cache->versions[0][cell] = cache->versions[1][cell] = ++cache->generation;
+                    cache->resource_generation[0] = cache->resource_generation[1] = cache->generation;
                 }
+                dirty[0] |= (uint32_t)(planes & 1u) << bit;
+                dirty[1] |= (uint32_t)(planes >> 1) << bit;
             }
-            cache->map[cell] = (uint8_t)character;
+            /* Plane one regains private storage after sharing plane zero. */
+            if (restore_plane_one) dirty[1] = UINT32_MAX;
+            for (unsigned variant = 0; variant < 2; ++variant) {
+                if (!dirty[variant]) continue;
+                cache->pending_count[variant] += (uint32_t)__builtin_popcount(dirty[variant] & ~cache->pending[variant][word]);
+                cache->pending[variant][word] |= dirty[variant];
+                cache->resident[variant][word] &= ~dirty[variant];
+                out->changed_cells[variant] += (uint32_t)__builtin_popcount(dirty[variant]);
+            }
         }
         cache->valid = true;
         memcpy(cache->previous_vram, cap->vram, sizeof(cache->previous_vram));
@@ -210,6 +335,24 @@ static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
         cache->previous_versions=*versions;
         cache->uniform_palette_certified=uniform_policy;
         cache->certified_palette_height=cap->visible_height;
+    }
+    if(screen) {
+        const bool unchanged=cache->screen_valid &&
+            cache->screen_geometry==view->generation && cache->screen_epoch==cache->resident_epoch &&
+            !memcmp(cache->screen_lines,cache->lines,cap->visible_height*sizeof(*cache->lines));
+        if(!unchanged) {
+            RasterScreen(cache,cap);
+            memcpy(cache->screen_lines,cache->lines,cap->visible_height*sizeof(*cache->lines));
+            cache->screen_geometry=view->generation;cache->screen_epoch=cache->resident_epoch;
+            cache->screen_valid=true;
+        }
+        for(unsigned variant=0;variant<2;++variant) {
+            out->pixels[variant]=cache->screen[variant];
+            out->versions[variant]=cache->screen_versions[variant];
+            out->resource_generation[variant]=cache->screen_resource_generation[variant];
+        }
+        out->lines=cache->lines;out->screen=1;
+        return SNESRECOMP_PPU_OK;
     }
     /* Character/map invalidation stays independent of camera movement.
      * Materialize only requested dirty cells; pending invisible work survives
@@ -239,9 +382,11 @@ static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
     for (unsigned variant = 0; variant < 2; ++variant) {
         out->pixels[variant] = cache->pixels[variant && cache->shared_planes ? 0 : variant];
         out->versions[variant] = cache->versions[variant];
+        out->character_versions[variant] = cache->character_versions[variant];
         out->resident_cells[variant]=view?cache->resident[variant && cache->shared_planes?0:variant]:NULL;
         out->resource_generation[variant] = cache->resource_generation[variant];
     }
+    out->map = cache->map;
     if(view) {
         out->sampled_cells[0]=cache->visible[0].words;
         out->sampled_cells[1]=cache->visible[1].words;
@@ -254,11 +399,11 @@ static SnesRecompPpuResult PrepareWorld(SnesRecompMode7WorldCache *cache,
 
 SnesRecompPpuResult snesrecomp_mode7_world_prepare(SnesRecompMode7WorldCache *cache,
     const SnesRecompPpuFrame *frame,SnesRecompMode7WorldPlan *out) {
-    return PrepareWorld(cache,frame,out,false,NULL);
+    return PrepareWorld(cache,frame,out,false,NULL,false);
 }
 SnesRecompPpuResult snesrecomp_mode7_world_prepare_raw(SnesRecompMode7WorldCache *cache,
     const SnesRecompPpuFrame *frame,SnesRecompMode7WorldPlan *out) {
-    return PrepareWorld(cache,frame,out,true,NULL);
+    return PrepareWorld(cache,frame,out,true,NULL,false);
 }
 
 SnesRecompPpuResult snesrecomp_mode7_world_prepare_view(SnesRecompMode7WorldCache *cache,
@@ -266,26 +411,75 @@ SnesRecompPpuResult snesrecomp_mode7_world_prepare_view(SnesRecompMode7WorldCach
     SnesRecompMode7WorldGeometry *geometry) {
     if(!geometry) return SNESRECOMP_PPU_INVALID;
     memset(geometry,0,sizeof *geometry);
-    return PrepareWorld(cache,frame,out,raw,geometry);
+    return PrepareWorld(cache,frame,out,raw,geometry,false);
+}
+
+SnesRecompPpuResult snesrecomp_mode7_world_prepare_unshaded_view(SnesRecompMode7WorldCache *cache,
+    const SnesRecompPpuFrame *frame,SnesRecompMode7WorldPlan *out,SnesRecompMode7WorldGeometry *geometry) {
+    if(!geometry) return SNESRECOMP_PPU_INVALID;
+    memset(geometry,0,sizeof *geometry);
+    return PrepareWorld(cache,frame,out,false,geometry,true);
 }
 
 SnesRecompPpuResult snesrecomp_mode7_world_cached_spans(SnesRecompMode7WorldCache *cache,
     const SnesRecompPpuFrame *frame, const SnesRecompMode7WorldPlan *world,
     SnesRecompMode7WorldGeometry *out) {
+    return CachedSpans(cache,snesrecomp_ppu_frame_capture(frame),world,out,false);
+}
+
+/* One strip per window segment and line. The texture holds the screen at
+ * texel (x, y); centres sit at 2x+1 and 4y+2 in 1024-texel 8.8 units. */
+static SnesRecompPpuResult CompileScreenSpans(const SnesPpuFrameCapture *cap,
+    SnesRecompMode7WorldSpan *spans,unsigned capacity,unsigned *count) {
+    unsigned used=0;
+    for(unsigned bi=0;bi<cap->band_count;++bi) {
+        const SnesPpuRasterBand *b=cap->bands+bi;
+        if(b->forced_blank || !(b->main_enable&1u)) continue;
+        SnesRecompWindowSpan windows[SNESRECOMP_WINDOW_MAX_SPANS];
+        const unsigned nw=snesrecomp_ppu_window_spans(cap,b,windows,SNESRECOMP_WINDOW_MAX_SPANS);
+        if(!nw) return SNESRECOMP_PPU_INVALID;
+        for(unsigned wi=0;wi<nw;++wi) {
+            const SnesRecompWindowSpan *window=windows+wi;
+            if(!(window->mask&1u)) continue;
+            int left=(int)cap->canvas_extra-b->bg[0].margin_left;
+            int right=(int)cap->canvas_extra+256+b->bg[0].margin_right;
+            if(left<window->begin) left=window->begin;
+            if(right>window->end) right=window->end;
+            if(left<0 || left>=right) continue;
+            const bool math=(window->mask&SNESRECOMP_SEMANTIC_MATH) && (b->cgadsub&1u);
+            const bool clip=!(window->mask&SNESRECOMP_SEMANTIC_MAIN_RGB);
+            const uint32_t colour=snesrecomp_ppu_compose_colour(0,b->fixed_colour,true,math,
+                (b->cgadsub&128u)!=0,(b->cgadsub&64u)&&!(b->cgwsel&2u),b->brightness);
+            for(unsigned y=b->y_begin;y<b->y_end;++y) {
+                if(used==capacity) return SNESRECOMP_PPU_RESOURCE_LIMIT;
+                spans[used++]=(SnesRecompMode7WorldSpan){(uint16_t)left,(uint16_t)right,(uint16_t)y,
+                    (uint8_t)math,(uint8_t)clip,512*left+256,1024*(int32_t)y+512,512,0,colour};
+            }
+        }
+    }
+    *count=used;
+    return SNESRECOMP_PPU_OK;
+}
+
+static SnesRecompPpuResult CachedSpans(SnesRecompMode7WorldCache *cache,
+    const SnesPpuFrameCapture *cap, const SnesRecompMode7WorldPlan *world,
+    SnesRecompMode7WorldGeometry *out,bool screen) {
     if (!out) return SNESRECOMP_PPU_INVALID;
     memset(out, 0, sizeof(*out));
-    const SnesPpuFrameCapture *cap = snesrecomp_ppu_frame_capture(frame);
     if (!cache || !cap || !world || world->lines != cache->lines ||
         world->pixels[0] != cache->pixels[0]) return SNESRECOMP_PPU_INVALID;
-    if (!(cache->spans_valid && cache->previous_band_count == cap->band_count &&
+    if (!(cache->spans_valid && cache->spans_screen == screen &&
+        cache->previous_band_count == cap->band_count &&
         cache->previous_width == cap->canvas_width && cache->previous_height == cap->visible_height &&
         cache->previous_extra == cap->canvas_extra &&
         !memcmp(&cache->previous_layout, &cap->layout, sizeof(cap->layout)) &&
         !memcmp(cache->previous_bands, cap->bands, cap->band_count * sizeof(*cap->bands)))) {
         cache->spans_valid = false;
-        SnesRecompPpuResult result = CompileWorldSpans(frame,world,cache->spans,
-            32768,&cache->span_count,cache->phases);
+        SnesRecompPpuResult result = screen ?
+            CompileScreenSpans(cap,cache->spans,32768,&cache->span_count) :
+            CompileWorldSpans(cap,world,cache->spans,32768,&cache->span_count,cache->phases);
         if (result != SNESRECOMP_PPU_OK) return result;
+        cache->spans_screen = screen;
         cache->previous_band_count = cap->band_count;
         cache->previous_width = cap->canvas_width; cache->previous_height = cap->visible_height;
         cache->previous_extra = cap->canvas_extra; cache->previous_layout = cap->layout;
@@ -309,15 +503,14 @@ static unsigned Mode7RunLimit(uint32_t start, int32_t step, unsigned limit) {
 SnesRecompPpuResult snesrecomp_mode7_world_spans(const SnesRecompPpuFrame *frame,
     const SnesRecompMode7WorldPlan *world,SnesRecompMode7WorldSpan *spans,
     unsigned capacity,unsigned *count) {
-    return CompileWorldSpans(frame,world,spans,capacity,count,NULL);
+    return CompileWorldSpans(snesrecomp_ppu_frame_capture(frame),world,spans,capacity,count,NULL);
 }
 
-static SnesRecompPpuResult CompileWorldSpans(const SnesRecompPpuFrame *frame,
+static SnesRecompPpuResult CompileWorldSpans(const SnesPpuFrameCapture *cap,
     const SnesRecompMode7WorldPlan *world,SnesRecompMode7WorldSpan *spans,
     unsigned capacity,unsigned *count,Mode7PhaseEntry *phases) {
     if (!count) return SNESRECOMP_PPU_INVALID;
     *count = 0;
-    const SnesPpuFrameCapture *cap = snesrecomp_ppu_frame_capture(frame);
     if (!cap || !world || !world->lines || !spans) return SNESRECOMP_PPU_INVALID;
     unsigned used = 0;
     for (unsigned bi = 0; bi < cap->band_count; ++bi) {

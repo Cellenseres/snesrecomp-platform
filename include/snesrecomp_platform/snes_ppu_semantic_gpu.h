@@ -61,6 +61,9 @@ typedef struct SnesRecompWindowSpan {
 unsigned snesrecomp_ppu_window_spans(const SnesPpuFrameCapture *capture,
     const SnesPpuRasterBand *band, SnesRecompWindowSpan *spans,
     unsigned capacity);
+/* True when bands a and b of capture compile to the same window spans. */
+bool snesrecomp_ppu_window_spans_equal(const SnesPpuFrameCapture *capture,
+    unsigned a, unsigned b);
 
 uint8_t snesrecomp_ppu_semantic_meta(unsigned source, bool palette_zero);
 unsigned snesrecomp_ppu_semantic_source(uint8_t metadata);

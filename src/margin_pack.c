@@ -237,6 +237,10 @@ static void StoreArgb(uint8_t *p, uint32_t value) {
 
 static uint32_t Composite(
     const uint8_t *rgba, uint32_t destination, unsigned brightness) {
+    /* Exact shortcuts of the blend below for the common art pixels. */
+    if (rgba[3] == 0u) return destination;
+    if (rgba[3] == 255u && brightness == 15u)
+        return 0xff000000u | ((uint32_t)rgba[0] << 16) | ((uint32_t)rgba[1] << 8) | rgba[2];
     const unsigned r = (unsigned)rgba[0] * brightness / 15u;
     const unsigned g = (unsigned)rgba[1] * brightness / 15u;
     const unsigned b = (unsigned)rgba[2] * brightness / 15u;

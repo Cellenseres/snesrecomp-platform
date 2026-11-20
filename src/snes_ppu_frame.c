@@ -26,6 +26,10 @@ struct SnesRecompPpuFrame {
     uint8_t priorities[SNES_PPU_MAX_BANDS];
     uint16_t obj_pixels[SNESRECOMP_PPU_MAX_WIDTH * SNES_PPU_MAX_BANDS];
     uint64_t obj_coverage[SNES_PPU_MAX_BANDS];
+    /* Producer rows and stamp of the last freeze; see obj_row_serials. */
+    const uint16_t *obj_source;
+    const uint64_t *obj_row_serials;
+    uint64_t obj_serial;
 };
 /* Like frame retain/freeze, creation belongs to the host thread. Workers only
  * borrow immutable views; they do not create or mutate frame owners. */
@@ -99,7 +103,7 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze_raster_view(SnesRecompPpuFrame *
     f->capture=capture;f->capture.bands=f->bands;f->capture.band_count=count;
     if(capture.resolved_windows) f->capture.resolved_windows=f->windows;
     f->storage=storage;f->storage_versions=storage->versions;
-    f->has_obj=source->has_obj;
+    f->has_obj=source->has_obj;f->obj_row_serials=NULL;
     if(!vram) ++f->versions.vram;
     if(!palette) ++f->versions.palette;
     if(!objects) ++f->versions.objects;
@@ -113,44 +117,40 @@ static uint32_t InvalidObjPair(uint32_t pair) {
      * byte order; memcpy permits unaligned capture storage. */
     return (pair&0xf000f000u)|(((pair&0x08000800u)>>4)&~pair);
 }
-static SnesRecompPpuResult Validate(const SnesPpuFrameCapture *c,
-    const SnesRecompObjFrame *obj, const SnesRecompPpuFrame *previous,
-    bool *same_objects, uint64_t *coverage) {
+/* Reused by full freeze and the explicit object-only owned update. */
+/* changed[y] is nonzero for rows the previous plane does not already hold. */
+static SnesRecompPpuResult ValidateObjectPlane(const SnesPpuFrameCapture *c,
+    const SnesRecompPpuFrame *previous,bool *same_objects,uint64_t *coverage,uint8_t *changed) {
     *same_objects=false;
-    if (!c || !c->vram || !c->cgram || !c->bands ||
-        c->native_width != 256 || c->canvas_width < 256 ||
-        c->canvas_width > SNESRECOMP_PPU_MAX_WIDTH ||
-        c->canvas_extra > c->canvas_width - 256 ||
-        !c->visible_height || c->visible_height > SNES_PPU_MAX_BANDS ||
-        !c->band_count || c->band_count > SNES_PPU_MAX_BANDS ||
-        (c->oam == NULL) != (c->high_oam == NULL) ||
-        (c->cgram_line_count && (!c->cgram_lines ||
-         c->cgram_line_count != c->visible_height)))
-        return SNESRECOMP_PPU_INVALID;
-    unsigned end = 0;
-    if(c->resolved_windows) for(unsigned i=0;i<c->band_count*6u;++i)
-        if((c->resolved_windows[i].selector>15u && c->resolved_windows[i].selector!=255u) ||
-            c->resolved_windows[i].logic>3u) return SNESRECOMP_PPU_INVALID;
-    for (unsigned b = 0; b < c->band_count; ++b) {
-        if (c->bands[b].y_begin != end || c->bands[b].y_end <= end ||
-            c->bands[b].y_end > c->visible_height)
-            return SNESRECOMP_PPU_INVALID;
-        end = c->bands[b].y_end;
-        for (unsigned layer = 0; layer < SNES_PPU_BG_COUNT; ++layer)
-            if (!snesrecomp_ppu_elastic_valid(&c->bands[b].bg[layer]))
-                return SNESRECOMP_PPU_INVALID;
-    }
-    if (end != c->visible_height) return SNESRECOMP_PPU_INVALID;
     if ((c->obj_pixels && c->obj_pitch < c->canvas_width) ||
         (!c->obj_pixels && c->obj_pitch)) return SNESRECOMP_PPU_INVALID;
-    if (c->obj_pixels && previous->valid && !previous->storage && previous->capture.obj_pixels &&
-        c->obj_pitch==c->canvas_width && previous->capture.canvas_width==c->canvas_width &&
-        previous->capture.visible_height==c->visible_height)
-        *same_objects=snesrecomp_ppu_words_equal(previous->obj_pixels,c->obj_pixels,
-            (size_t)c->canvas_width*c->visible_height);
-    if (c->obj_pixels && !*same_objects)
+    const bool comparable=c->obj_pixels && previous->valid && !previous->storage &&
+        previous->capture.obj_pixels && previous->capture.canvas_width==c->canvas_width &&
+        previous->capture.visible_height==c->visible_height;
+    /* One pass over the rows decides both: a plane-wide compare first would
+     * read the unchanged prefix twice whenever a sprite moved. */
+    bool all_rows_same=comparable && c->obj_pitch==c->canvas_width;
+    const bool stamped=comparable && c->obj_row_serials && previous->obj_row_serials==c->obj_row_serials &&
+        previous->obj_source==c->obj_pixels && previous->obj_serial<c->obj_serial;
+    if (c->obj_pixels)
         for (unsigned y = 0; y < c->visible_height; ++y) {
             const uint16_t *row=c->obj_pixels+(size_t)y*c->obj_pitch;
+            if(stamped && c->obj_row_serials[y]<=previous->obj_serial) {
+                coverage[y]=previous->obj_coverage[y];
+                changed[y]=0;
+                continue;
+            }
+            /* Previously owned rows have already passed qualification. Retain
+             * their coverage only after exact pixel equality; changed rows
+             * still receive the complete original validation before publish. */
+            if(comparable && snesrecomp_ppu_words_equal(
+                previous->obj_pixels+(size_t)y*c->canvas_width,row,c->canvas_width)) {
+                coverage[y]=previous->obj_coverage[y];
+                changed[y]=0;
+                continue;
+            }
+            all_rows_same=false;
+            changed[y]=1;
             uint64_t occupied=0;
             unsigned x=0;
             for (;x+8u<=c->canvas_width;x+=8) {
@@ -181,6 +181,39 @@ static SnesRecompPpuResult Validate(const SnesPpuFrameCapture *c,
             }
             coverage[y]=occupied;
         }
+    *same_objects=c->obj_pixels && all_rows_same;
+    return SNESRECOMP_PPU_OK;
+}
+static SnesRecompPpuResult Validate(const SnesPpuFrameCapture *c,
+    const SnesRecompObjFrame *obj, const SnesRecompPpuFrame *previous,
+    bool *same_objects, uint64_t *coverage, uint8_t *changed_rows) {
+    *same_objects=false;
+    if (!c || !c->vram || !c->cgram || !c->bands ||
+        c->native_width != 256 || c->canvas_width < 256 ||
+        c->canvas_width > SNESRECOMP_PPU_MAX_WIDTH ||
+        c->canvas_extra > c->canvas_width - 256 ||
+        !c->visible_height || c->visible_height > SNES_PPU_MAX_BANDS ||
+        !c->band_count || c->band_count > SNES_PPU_MAX_BANDS ||
+        (c->oam == NULL) != (c->high_oam == NULL) ||
+        (c->cgram_line_count && (!c->cgram_lines ||
+         c->cgram_line_count != c->visible_height)))
+        return SNESRECOMP_PPU_INVALID;
+    unsigned end = 0;
+    if(c->resolved_windows) for(unsigned i=0;i<c->band_count*6u;++i)
+        if((c->resolved_windows[i].selector>15u && c->resolved_windows[i].selector!=255u) ||
+            c->resolved_windows[i].logic>3u) return SNESRECOMP_PPU_INVALID;
+    for (unsigned b = 0; b < c->band_count; ++b) {
+        if (c->bands[b].y_begin != end || c->bands[b].y_end <= end ||
+            c->bands[b].y_end > c->visible_height)
+            return SNESRECOMP_PPU_INVALID;
+        end = c->bands[b].y_end;
+        for (unsigned layer = 0; layer < SNES_PPU_BG_COUNT; ++layer)
+            if (!snesrecomp_ppu_elastic_valid(&c->bands[b].bg[layer]))
+                return SNESRECOMP_PPU_INVALID;
+    }
+    if (end != c->visible_height) return SNESRECOMP_PPU_INVALID;
+    const SnesRecompPpuResult plane=ValidateObjectPlane(c,previous,same_objects,coverage,changed_rows);
+    if(plane!=SNESRECOMP_PPU_OK) return plane;
     if ((c->raster_memory_flags & ~SNES_PPU_RASTER_MEMORY_CGRAM) ||
         ((c->raster_memory_flags & SNES_PPU_RASTER_MEMORY_CGRAM) &&
          c->cgram_line_count != c->visible_height))
@@ -215,7 +248,8 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
     if (f->references != 1) return SNESRECOMP_PPU_BUSY;
     bool same_objects;
     uint64_t coverage[SNES_PPU_MAX_BANDS];
-    const SnesRecompPpuResult result = Validate(c, obj, f, &same_objects, coverage);
+    uint8_t changed_rows[SNES_PPU_MAX_BANDS];
+    const SnesRecompPpuResult result = Validate(c, obj, f, &same_objects, coverage, changed_rows);
     if (result != SNESRECOMP_PPU_OK) return result;
     const SnesPpuFrameCapture source=*c;
     c=&source; /* Source views may refer to this frame's previous snapshot. */
@@ -224,7 +258,17 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
         if (((c->bands[i].main_enable | c->bands[i].sub_enable) & 16u) &&
             !obj && !c->obj_pixels)
             return SNESRECOMP_PPU_INCOMPLETE_MEMORY;
-    const bool same_vram=f->valid && !f->storage && snesrecomp_ppu_words_equal(f->vram,c->vram,SNES_PPU_VRAM_WORDS);
+    /* Map scrolling rewrites a few blocks per frame; copy only those. */
+    enum { VRAM_BLOCK_WORDS = 512, VRAM_BLOCKS = SNES_PPU_VRAM_WORDS / VRAM_BLOCK_WORDS };
+    uint64_t vram_changed = ~UINT64_C(0);
+    if (f->valid && !f->storage) {
+        vram_changed = 0;
+        for (unsigned b = 0; b < VRAM_BLOCKS; ++b)
+            if (!snesrecomp_ppu_words_equal(f->vram + b * VRAM_BLOCK_WORDS,
+                    c->vram + b * VRAM_BLOCK_WORDS, VRAM_BLOCK_WORDS))
+                vram_changed |= UINT64_C(1) << b;
+    }
+    const bool same_vram = !vram_changed;
     const bool same_palette=f->valid && !f->storage && f->capture.cgram_line_count==c->cgram_line_count &&
         snesrecomp_ppu_words_equal(f->cgram,c->cgram,SNES_PPU_CGRAM_ENTRIES) &&
         (!c->cgram_line_count || snesrecomp_ppu_words_equal(f->palettes,c->cgram_lines,
@@ -235,7 +279,13 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
         (!same_plane && f->versions.objects==UINT64_MAX)) return SNESRECOMP_PPU_RESOURCE_LIMIT;
     const SnesRecompPpuFrame *previous_storage=f->storage;
     f->capture = *c;
-    if(!same_vram) { memcpy(f->vram, c->vram, sizeof(f->vram));++f->versions.vram; }
+    if(!same_vram) {
+        for (unsigned b = 0; b < VRAM_BLOCKS; ++b)
+            if (vram_changed & (UINT64_C(1) << b))
+                memcpy(f->vram + b * VRAM_BLOCK_WORDS, c->vram + b * VRAM_BLOCK_WORDS,
+                       VRAM_BLOCK_WORDS * sizeof *f->vram);
+        ++f->versions.vram;
+    }
     if(!same_palette) { memcpy(f->cgram, c->cgram, sizeof(f->cgram));++f->versions.palette; }
     if(!same_plane) ++f->versions.objects;
     memcpy(f->bands, c->bands, c->band_count * sizeof(*c->bands));
@@ -249,9 +299,10 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
     if (c->obj_pixels) {
         if(!same_objects) memcpy(f->obj_coverage,coverage,c->visible_height*sizeof(*coverage));
         for (unsigned y = 0; !same_objects && y < c->visible_height; ++y)
-            memcpy(f->obj_pixels + y * c->canvas_width,
-                   c->obj_pixels + y * c->obj_pitch,
-                   c->canvas_width * sizeof(uint16_t));
+            if (changed_rows[y])
+                memcpy(f->obj_pixels + y * c->canvas_width,
+                       c->obj_pixels + y * c->obj_pitch,
+                       c->canvas_width * sizeof(uint16_t));
         f->capture.obj_pixels = f->obj_pixels;
         f->capture.obj_pitch = c->canvas_width;
     }
@@ -283,10 +334,61 @@ SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
         f->obj.capacity = SNESRECOMP_OBJ_MAX_SLIVERS;
         f->obj.line_capacity = SNES_PPU_MAX_BANDS;
     }
+    f->obj_source=c->obj_pixels;f->obj_row_serials=c->obj_row_serials;f->obj_serial=c->obj_serial;
+    f->capture.obj_row_serials=NULL;f->capture.obj_serial=0;
     f->sequence = sequence;
     f->valid = true;
     f->storage=NULL;f->storage_versions=(SnesRecompPpuFrameVersions){0};
     snesrecomp_ppu_frame_release(previous_storage);
+    return SNESRECOMP_PPU_OK;
+}
+
+SnesRecompPpuResult snesrecomp_ppu_frame_replace_objects(SnesRecompPpuFrame *f,
+    const SnesRecompPpuObjectUpdate *update) {
+    if(!f || !update) return SNESRECOMP_PPU_INVALID;
+    if(f->references!=1) return SNESRECOMP_PPU_BUSY;
+    /* A raster view borrows storage; a sliver authority has different inputs.
+     * Neither can silently become an ordinary owned qualified-pixel frame. */
+    if(!f->valid || f->storage || f->has_obj) return SNESRECOMP_PPU_UNSUPPORTED;
+    if(!update->pixels || update->pitch<f->capture.canvas_width ||
+        (update->oam==NULL)!=(update->high_oam==NULL)) return SNESRECOMP_PPU_INVALID;
+    /* Canonical self-replacement is a no-copy hit. Other overlap cannot be
+     * copied row-by-row transactionally without temporary storage. Refuse it
+     * before validation/publication, rather than invoking overlapping memcpy. */
+    const size_t source_bytes=((size_t)(f->capture.visible_height-1u)*update->pitch+
+        f->capture.canvas_width)*sizeof(uint16_t);
+    const uintptr_t source=(uintptr_t)update->pixels,target=(uintptr_t)f->obj_pixels;
+    const size_t target_bytes=(size_t)f->capture.visible_height*f->capture.canvas_width*sizeof(uint16_t);
+    if(source>UINTPTR_MAX-source_bytes ||
+        (source<target+target_bytes && target<source+source_bytes &&
+         (update->pixels!=f->obj_pixels || update->pitch!=f->capture.canvas_width)))
+        return SNESRECOMP_PPU_INVALID;
+    SnesPpuFrameCapture next=f->capture;
+    next.obj_pixels=update->pixels;next.obj_pitch=update->pitch;
+    bool same;
+    uint64_t coverage[SNES_PPU_MAX_BANDS];
+    uint8_t changed_rows[SNES_PPU_MAX_BANDS];
+    const SnesRecompPpuResult result=ValidateObjectPlane(&next,f,&same,coverage,changed_rows);
+    if(result!=SNESRECOMP_PPU_OK) return result;
+    if(!same && f->versions.objects==UINT64_MAX) return SNESRECOMP_PPU_RESOURCE_LIMIT;
+    if(!same) {
+        for(unsigned y=0;y<next.visible_height;++y)
+            if(changed_rows[y])
+                memcpy(f->obj_pixels+y*next.canvas_width,
+                    update->pixels+y*update->pitch,next.canvas_width*sizeof(uint16_t));
+        memcpy(f->obj_coverage,coverage,next.visible_height*sizeof *coverage);
+        ++f->versions.objects;
+    }
+    f->obj_row_serials=NULL;
+    f->capture.obj_pixels=f->obj_pixels;f->capture.obj_pitch=next.canvas_width;
+    if(update->oam) {
+        if(update->oam!=f->oam)memcpy(f->oam,update->oam,sizeof f->oam);
+        if(update->high_oam!=f->high_oam)memcpy(f->high_oam,update->high_oam,sizeof f->high_oam);
+        f->capture.oam=f->oam;f->capture.high_oam=f->high_oam;
+    } else {f->capture.oam=NULL;f->capture.high_oam=NULL;}
+    f->capture.vram_dirty_words=update->vram_dirty_words;
+    f->capture.cgram_dirty_entries=update->cgram_dirty_entries;
+    f->sequence=update->sequence;
     return SNESRECOMP_PPU_OK;
 }
 

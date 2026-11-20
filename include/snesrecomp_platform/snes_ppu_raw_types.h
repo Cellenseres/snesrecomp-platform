@@ -10,6 +10,17 @@
 #define SNESRECOMP_RAW_OBJ_SUB 16u
 #define SNESRECOMP_RAW_OBJ_MATH 32u
 enum { SNESRECOMP_RAW_REGION_LIMIT=128 };
+/* Qualified winners, not OAM to be selected again. The caller retains the
+ * immutable frame owning ALL pointers until prepare/submit or cancellation.
+ * Palette rows contain 256 RGB5 words. Nonzero generations are scoped to owner;
+ * resetting/reusing storage must never reuse its owner/generation certificate. */
+typedef struct SnesRecompPpuQualifiedObjects {
+    const uint16_t *pixels, *palette, *palette_lines;
+    const uint64_t *coverage;
+    uint64_t owner, object_generation, palette_generation;
+    uint16_t width, height, pitch, palette_line_count;
+} SnesRecompPpuQualifiedObjects;
+
 typedef struct SnesRecompPpuRawRegion {
     uint16_t x0,y0,x1,y1;
     uint32_t main_backdrop,sub_backdrop;

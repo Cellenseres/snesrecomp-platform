@@ -26,7 +26,10 @@ function(snesrecomp_platform_patch_apu_catchup text_var)
     set(_text "${${text_var}}")
     _snesrecomp_apu_program_edit(_text
         "  for(int i = 0; i < catchupCycles; i++) {\n    apu_cycle(snes->apu);\n  }\n"
-        "  extern uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles);\n  for(int i = 0; i < catchupCycles;) {\n    const uint32_t idle = snesrecomp_apu_program_skip(snes->apu, (uint32_t)(catchupCycles - i));\n    if (idle) {\n      i += (int)idle;\n      continue;\n    }\n    apu_cycle(snes->apu);\n    i++;\n  }\n")
+        "  extern uint32_t snesrecomp_apu_program_skip(Apu *apu, uint32_t cycles);\n  for(int i = 0; i < catchupCycles;) {\n    const uint32_t idle = catchupCycles - i > 1 ?\n        snesrecomp_apu_program_skip(snes->apu, (uint32_t)(catchupCycles - i)) : 0;\n    if (idle) {\n      i += (int)idle;\n      continue;\n    }\n    apu_cycle(snes->apu);\n    i++;\n  }\n")
+    _snesrecomp_apu_program_edit(_text
+        "  int catchupCycles = (int) snes->apuCatchupCycles;\n  if (catchupCycles < 0) catchupCycles = 0;\n"
+        "  int catchupCycles = (int) snes->apuCatchupCycles;\n  if (catchupCycles < 0) catchupCycles = 0;\n#ifndef SNESRECOMP_INTERP_PROFILE\n  /* No cycle, event or sample is due for this fractional credit. Preserve\n   * the producer's final state and call counter without idle discovery. */\n  if (!catchupCycles && snes->apuCatchupCycles >= 0.0) {\n    audio_trace_set_producer(AUDIO_TRACE_PRODUCER_UNKNOWN);\n    ++s_catchup_calls;\n    return;\n  }\n#endif\n")
     if(SNESRECOMP_PLATFORM_APU_CPU_SPANS)
         _snesrecomp_apu_program_edit(_text
             "  for(int i = 0; i < catchupCycles;) {\n"

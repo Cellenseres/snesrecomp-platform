@@ -28,6 +28,7 @@ typedef struct SnesRecompPpuRawPlan {
      * Eight exact priority/eligibility bits per 8x8 block. No guest work. */
     const uint8_t *object_classes;
     uint16_t object_class_pitch;
+    SnesRecompPpuQualifiedObjects qualified;
 } SnesRecompPpuRawPlan;
 
 SnesRecompPpuRawCache *snesrecomp_ppu_raw_create(void);
@@ -42,6 +43,11 @@ SnesRecompPpuResult snesrecomp_ppu_mode7_raw_plan(SnesRecompPpuRawCache *cache,
 /* Mode-1 region/material and qualified OBJ plane. BG pixels come from cached
  * mode1_raw_tiles geometry; both inputs are needed for an executable frame. */
 SnesRecompPpuResult snesrecomp_ppu_mode1_raw_plan(SnesRecompPpuRawCache *cache,
+    const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out);
+/* Same admission as mode1_raw_plan, but leaves RGB generation to the backend.
+ * Does not clear/write the legacy ARGB plane or certify it as current. Caller
+ * pins frame until the backend finishes reading the qualified view. */
+SnesRecompPpuResult snesrecomp_ppu_mode1_raw_qualified(SnesRecompPpuRawCache *cache,
     const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out);
 /* Regions only, for qualified indexed OBJ geometry rendered on the GPU.
  * Never reads/converts the captured OBJ plane or allocates pixel resources.

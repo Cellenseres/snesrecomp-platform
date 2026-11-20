@@ -15,6 +15,8 @@ struct SnesRecompPpuJob {
     SnesRecompPpuSource sources[SNESRECOMP_PPU_JOB_MAX_SOURCES];
     uint64_t versions[SNESRECOMP_PPU_JOB_MAX_IMAGES];
     bool premultiplied_valid[SNESRECOMP_PPU_JOB_MAX_IMAGES];
+    /* Sources already admitted on each screen, layer and row. */
+    uint16_t source_rows[2][3][SNES_PPU_MAX_BANDS][SNESRECOMP_PPU_JOB_SOURCES_PER_ROW];
     uint32_t *payload[2];
     uint64_t payload_geometry[2];
     uint64_t payload_versions[2][SNESRECOMP_PPU_JOB_MAX_IMAGES];
@@ -178,16 +180,19 @@ SnesRecompPpuResult snesrecomp_ppu_job_freeze_sources(SnesRecompPpuJob *j,
             (uint32_t)r->source_x+r->source_width>source[r->image].width ||
             (uint32_t)r->source_y+r->source_height>source[r->image].height)
             return SNESRECOMP_PPU_INVALID;
-        for(unsigned k=0;k<i;++k) {
-            const SnesRecompPpuSource *p=replacements+k;
-            if(p->layer==r->layer && (p->screens&r->screens) && p->x<r->x+r->width &&
-                r->x<p->x+p->width && p->y<r->y+r->height && r->y<p->y+p->height)
-                return SNESRECOMP_PPU_INVALID;
-        }
+        /* Overlapping sources share a row; only those can collide. */
         for(unsigned screen=0;screen<2;++screen) if(r->screens&(1u<<screen))
             for(unsigned y=r->y;y<r->y+r->height;++y)
-                if(++row_counts[screen][r->layer][y]>SNESRECOMP_PPU_JOB_SOURCES_PER_ROW)
-                    return SNESRECOMP_PPU_RESOURCE_LIMIT;
+                for(unsigned k=0;k<row_counts[screen][r->layer][y];++k) {
+                    const SnesRecompPpuSource *p=replacements+j->source_rows[screen][r->layer][y][k];
+                    if(p->x<r->x+r->width && r->x<p->x+p->width) return SNESRECOMP_PPU_INVALID;
+                }
+        for(unsigned screen=0;screen<2;++screen) if(r->screens&(1u<<screen))
+            for(unsigned y=r->y;y<r->y+r->height;++y) {
+                uint8_t *count=&row_counts[screen][r->layer][y];
+                if(*count==SNESRECOMP_PPU_JOB_SOURCES_PER_ROW) return SNESRECOMP_PPU_RESOURCE_LIMIT;
+                j->source_rows[screen][r->layer][y][(*count)++]=(uint16_t)i;
+            }
         if(same_geometry && memcmp(r,j->sources+i,sizeof(*r))) same_geometry=false;
     }
     for(unsigned i=0;i<overlay_count;++i) {
@@ -376,11 +381,12 @@ SnesRecompPpuResult snesrecomp_ppu_job_rebind(SnesRecompPpuJob *j,
     if(!j) return SNESRECOMP_PPU_INVALID;
     if(j->references!=1) return SNESRECOMP_PPU_BUSY;
     /* The source context cannot silently remain on the preceding frame. */
-    if(j->view.primitive_count || j->view.indexed_layout) return SNESRECOMP_PPU_UNSUPPORTED;
+    if(j->primitives_valid || j->view.graphics_frame || j->view.indexed_layout) return SNESRECOMP_PPU_UNSUPPORTED;
     const SnesPpuFrameCapture *next=snesrecomp_ppu_frame_capture(frame);
-    const SnesPpuFrameCapture *old=j->valid?snesrecomp_ppu_frame_capture(j->view.frame):NULL;
-    if(!next || !old || next->canvas_width!=old->canvas_width ||
-        next->visible_height!=old->visible_height) return SNESRECOMP_PPU_INVALID;
+    /* detach_frame releases the old capture, but not the owned payload or its
+     * validated canvas dimensions. Rebinding must not need that old frame. */
+    if(!j->valid || !next || next->canvas_width!=j->canvas_width ||
+        next->visible_height!=j->canvas_height) return SNESRECOMP_PPU_INVALID;
     snesrecomp_ppu_frame_retain(frame);snesrecomp_ppu_frame_release(j->view.frame);
     j->view.frame=frame;j->view.sequence=sequence;
     return SNESRECOMP_PPU_OK;

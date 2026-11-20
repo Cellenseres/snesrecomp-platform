@@ -86,7 +86,10 @@ SnesRecompPpuResult snesrecomp_ppu_indexed_palette_prepare(
         p->span_count=0;
         for(unsigned y=0;y<c->visible_height;) {
             unsigned end=y+1u;
-            while(end<c->visible_height && !memcmp(p->argb+y*256u,p->argb+end*256u,1024))++end;
+            /* With one palette for the frame every row holds that palette at
+             * its brightness, so equal brightness already means equal rows. */
+            while(end<c->visible_height && ((!c->cgram_lines && p->brightness[end]==p->brightness[y]) ||
+                  !memcmp(p->argb+y*256u,p->argb+end*256u,1024)))++end;
             p->spans[p->span_count++]=(SnesRecompIndexedPaletteSpan){(uint16_t)y,(uint16_t)end};y=end;
         }
     }

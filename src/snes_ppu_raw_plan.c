@@ -6,6 +6,10 @@
 #include "snes_ppu_windows.h"
 #include <stdlib.h>
 #include <string.h>
+#if defined(SNESRECOMP_PPU_TILE_COSTS)
+#include "snesrecomp_platform/task.h"
+#include <stdio.h>
+#endif
 
 struct SnesRecompPpuRawCache {
     SnesRecompPpuRawRegion regions[SNESRECOMP_RAW_REGION_LIMIT];
@@ -46,7 +50,7 @@ static bool Region(SnesRecompPpuRawCache *c,unsigned *count,
     c->scratch[(*count)++]=*next;return true;
 }
 static SnesRecompPpuResult RawPlan(SnesRecompPpuRawCache *c,
-    const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out,bool mode7,bool capture_objects) {
+    const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out,bool mode7,unsigned capture_objects) {
     if(!c || !out) return SNESRECOMP_PPU_INVALID;
     memset(out,0,sizeof(*out));
     const SnesPpuFrameCapture *cap=snesrecomp_ppu_frame_capture(frame);
@@ -56,6 +60,10 @@ static SnesRecompPpuResult RawPlan(SnesRecompPpuRawCache *c,
     if(out->unsupported) return SNESRECOMP_PPU_UNSUPPORTED;
     const SnesRecompObjFrame *slivers=snesrecomp_ppu_frame_obj(frame);
     if(capture_objects && !cap->obj_pixels && slivers && slivers->count) return SNESRECOMP_PPU_INCOMPLETE_MEMORY;
+#if defined(SNESRECOMP_PPU_TILE_COSTS)
+    const bool trace_costs=getenv("LUFIA2_PPU_JOB_TRACE_ROOT")!=NULL;
+    const uint64_t regions_begin=trace_costs?snesrecomp_now_us():0;
+#endif
     SnesRecompWindowSpan windows[SNESRECOMP_WINDOW_MAX_SPANS];
     unsigned window_count=0,region_count=0;
     for(unsigned bi=0;bi<cap->band_count;++bi) {
@@ -121,8 +129,11 @@ static SnesRecompPpuResult RawPlan(SnesRecompPpuRawCache *c,
         memcpy(c->regions,c->scratch,region_count*sizeof(*c->regions));
         c->region_count=region_count;c->regions_valid=true;++c->region_generation;
     }
+#if defined(SNESRECOMP_PPU_TILE_COSTS)
+    const uint64_t objects_begin=trace_costs?snesrecomp_now_us():0;
+#endif
     const uint64_t *coverage=capture_objects?snesrecomp_ppu_frame_obj_coverage(frame):NULL;
-    if(capture_objects && !same_objects) {
+    if(capture_objects==1 && !same_objects) {
         memset(c->object_classes,0,sizeof c->object_classes);
         memset(c->objects,0,(size_t)cap->canvas_width*cap->visible_height*sizeof(*c->objects));
         c->objects_any=false;
@@ -148,14 +159,25 @@ static SnesRecompPpuResult RawPlan(SnesRecompPpuRawCache *c,
     }
     /* Region preparation updates frame/size certificates. It cannot certify
      * any stale object image retained from an earlier full preparation. */
-    if(!capture_objects) c->objects_valid=false;
+    if(capture_objects!=1) c->objects_valid=false;
     c->width=cap->canvas_width;c->height=cap->visible_height;c->versions=*versions;
     out->regions=c->regions;out->region_count=c->region_count;
-    out->objects=capture_objects && c->objects_any?c->objects:NULL;out->object_coverage=coverage;
+    out->objects=capture_objects==1 && c->objects_any?c->objects:NULL;out->object_coverage=coverage;
+    if(capture_objects==2) out->qualified=(SnesRecompPpuQualifiedObjects){
+        .pixels=cap->obj_pixels,.palette=cap->cgram,.palette_lines=cap->cgram_lines,
+        .coverage=coverage,.owner=versions->owner,.object_generation=versions->objects,
+        .palette_generation=versions->palette,.width=cap->canvas_width,
+        .height=cap->visible_height,.pitch=cap->obj_pitch,
+        .palette_line_count=(uint16_t)cap->cgram_line_count};
     out->width=c->width;out->height=c->height;
-    out->region_generation=c->region_generation;out->object_generation=capture_objects?c->object_generation:0;
-    out->object_classes=capture_objects && c->objects_any?c->object_classes:NULL;
-    out->object_class_pitch=capture_objects?(uint16_t)((cap->canvas_width+7u)/8u):0;
+    out->region_generation=c->region_generation;out->object_generation=capture_objects==1?c->object_generation:0;
+    out->object_classes=capture_objects==1 && c->objects_any?c->object_classes:NULL;
+    out->object_class_pitch=capture_objects==1?(uint16_t)((cap->canvas_width+7u)/8u):0;
+#if defined(SNESRECOMP_PPU_TILE_COSTS)
+    if(trace_costs)fprintf(stderr,"PPU raw us: regions=%llu objects=%llu object_reused=%u capture_objects=%u\n",
+        (unsigned long long)(objects_begin-regions_begin),
+        (unsigned long long)(snesrecomp_now_us()-objects_begin),same_objects,capture_objects);
+#endif
     return SNESRECOMP_PPU_OK;
 }
 SnesRecompPpuResult snesrecomp_ppu_mode7_raw_plan(SnesRecompPpuRawCache *c,
@@ -169,4 +191,9 @@ SnesRecompPpuResult snesrecomp_ppu_mode1_raw_plan(SnesRecompPpuRawCache *c,
 SnesRecompPpuResult snesrecomp_ppu_mode1_raw_regions(SnesRecompPpuRawCache *c,
     const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out) {
     return RawPlan(c,frame,out,false,false);
+}
+
+SnesRecompPpuResult snesrecomp_ppu_mode1_raw_qualified(SnesRecompPpuRawCache *c,
+    const SnesRecompPpuFrame *frame,SnesRecompPpuRawPlan *out) {
+    return RawPlan(c,frame,out,false,2);
 }

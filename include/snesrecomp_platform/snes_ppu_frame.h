@@ -55,6 +55,25 @@ void snesrecomp_ppu_frame_release(const SnesRecompPpuFrame *frame);
 SnesRecompPpuResult snesrecomp_ppu_frame_freeze(
     SnesRecompPpuFrame *frame, const SnesPpuFrameCapture *capture,
     const SnesRecompObjFrame *qualified_obj, uint64_t sequence);
+/* Replace only qualified objects/OAM and advisory dirty counts in an owned
+ * frame. Every other background/raster/palette/layout input stays identical.
+ * Caller is responsible for deciding when that is the intended frame (for
+ * example, after a separate complete background dependency certificate).
+ * Input pixels are validated/copied; no borrowed pointer survives. A source
+ * overlapping the owned plane must be exactly its canonical pointer/pitch.
+ * Retained
+ * frames return BUSY unchanged. Raster views/sliver authorities are refused.
+ * Failure leaves the previous snapshot and all versions intact. */
+typedef struct SnesRecompPpuObjectUpdate {
+    const uint16_t *pixels, *oam;
+    const uint8_t *high_oam;
+    uint16_t pitch;
+    uint32_t vram_dirty_words, cgram_dirty_entries;
+    uint64_t sequence;
+} SnesRecompPpuObjectUpdate;
+SnesRecompPpuResult snesrecomp_ppu_frame_replace_objects(
+    SnesRecompPpuFrame *frame,const SnesRecompPpuObjectUpdate *update);
+
 /* An owned raster view shares only an already immutable snapshot's memory.
  * Bands are copied and validated; all other capture inputs are inherited.
  * The storage owner remains retained, so it cannot be frozen while in use.

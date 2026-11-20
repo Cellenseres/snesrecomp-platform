@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 enum { CELLS=64*32, SOURCES=SNESRECOMP_TILE_PLAN_QUADS+SNESRECOMP_OBJ_MAX_SLIVERS,
-       LINKS=SOURCES*8 };
+       LINKS=SOURCES*8, MERGE_KEYS=4096 };
 /* TMW alone does not activate a window. The source-colour shortcut must
  * reject an effective selector, including a consumer-resolved override, rather
  * than treating dormant enable masks as colour processing. */
@@ -66,7 +66,9 @@ struct SnesRecompIndexedDrawCache {
     SnesRecompIndexedDraw *draws[2];
     Source *sources;
     Link *links;
-    uint32_t heads[5*CELLS],seen[SOURCES],stamp;
+    uint32_t heads[5*CELLS],tails[5*CELLS],seen[SOURCES],stamp;
+    uint32_t merge_mark[MERGE_KEYS],merge_draw[MERGE_KEYS],merge_stamp;
+    uint32_t row_mark[512],row_source[512],row_stamp;
     uint16_t line_band[256];
     SnesRecompIndexedDrawPlan plan;
     uint64_t owner,layout,objects,projection,background,frame_owner,vram;
@@ -105,27 +107,56 @@ static bool AddSource(SnesRecompIndexedDrawCache *c,Source s,unsigned *count,uns
     for(unsigned x=s.x0/8u;x<=(s.x1-1u)/8u;++x) {
         if(*links==LINKS) return false;
         const unsigned cell=s.plane*CELLS+y*64u+x;
-        c->links[*links]=(Link){c->heads[cell],n};c->heads[cell]=(*links)++;
+        /* Keep insertion order so a sprite's next row follows the row above
+         * and AppendDraw can extend it. */
+        c->links[*links]=(Link){UINT32_MAX,n};
+        if(c->heads[cell]==UINT32_MAX)c->heads[cell]=*links;else c->links[c->tails[cell]].next=*links;
+        c->tails[cell]=(*links)++;
     }
     return true;
 }
-static bool AppendDraw(SnesRecompIndexedDraw *draws,SnesRecompIndexedDrawPlan *plan,
-    unsigned first,unsigned capacity,SnesRecompIndexedDraw next) {
+/* Rows of one 8x8 OBJ tile share their colour classes. Extending the source
+ * above clips and projects to the same pixels as the separate rows. */
+static bool ExtendObjectRow(SnesRecompIndexedDrawCache *c,Source s,unsigned key,unsigned *links) {
+    if(c->row_mark[key]!=c->row_stamp) return false;
+    Source *a=c->sources+c->row_source[key];
+    if(a->y1!=s.y0 || a->x0!=s.x0 || a->x1!=s.x1 || a->priority!=s.priority || a->classes!=s.classes ||
+       a->winner!=s.winner || a->owner!=s.owner || a->band!=s.band || a->palette!=s.palette || a->plane!=s.plane)
+        return false;
+    if(s.y0/8u!=(a->y1-1u)/8u) {
+        const unsigned y=s.y0/8u;
+        for(unsigned x=s.x0/8u;x<=(s.x1-1u)/8u;++x) {
+            if(*links==LINKS) return false;
+            const unsigned cell=s.plane*CELLS+y*64u+x;
+            c->links[*links]=(Link){UINT32_MAX,c->row_source[key]};
+            if(c->heads[cell]==UINT32_MAX)c->heads[cell]=*links;else c->links[c->tails[cell]].next=*links;
+            c->tails[cell]=(*links)++;
+        }
+    }
+    a->y1=s.y1;return true;
+}
+static bool AppendDraw(SnesRecompIndexedDrawCache *c,SnesRecompIndexedDraw *draws,
+    SnesRecompIndexedDrawPlan *plan,SnesRecompIndexedDraw next) {
     /* Row-slivers are original authority, not necessarily separate GPU draws.
      * Merge only inside this one ordered projection rectangle. Native winner,
-     * full Z, material and source sampling must ALL remain identical. */
-    const unsigned begin=plan->count>64u && plan->count-64u>first?plan->count-64u:first;
-    for(unsigned i=plan->count;i>begin;) {
-        SnesRecompIndexedDraw *a=draws+--i;
-        if(a->priority!=next.priority || a->material!=next.material || a->winner!=next.winner || a->index!=next.index ||
-           a->rect.x0!=next.rect.x0 || a->rect.x1!=next.rect.x1 || a->rect.y1!=next.rect.y0 ||
-           a->rect.source_x!=next.rect.source_x || a->rect.owner!=next.rect.owner || a->rect.object!=next.rect.object ||
-           a->rect.plane!=next.rect.plane || a->rect.x_step!=next.rect.x_step || a->rect.y_step!=next.rect.y_step ||
-           a->rect.owner_required!=next.rect.owner_required ||
-           a->rect.source_y+(a->rect.y1-a->rect.y0)*a->rect.y_step!=next.rect.source_y) continue;
-        a->rect.y1=next.rect.y1;return true;
+     * full Z, material and source sampling must ALL remain identical. The
+     * table remembers the latest draw per shape, so a sliver finds the row
+     * above it without scanning. */
+    const unsigned key=(next.rect.x0*7u^next.rect.x1*131u^next.index*2053u^
+        next.winner*40503u^next.priority)&(MERGE_KEYS-1u);
+    if(c->merge_mark[key]==c->merge_stamp) {
+        SnesRecompIndexedDraw *a=draws+c->merge_draw[key];
+        if(a->priority==next.priority && a->material==next.material && a->winner==next.winner && a->index==next.index &&
+           a->rect.x0==next.rect.x0 && a->rect.x1==next.rect.x1 && a->rect.y1==next.rect.y0 &&
+           a->rect.source_x==next.rect.source_x && a->rect.owner==next.rect.owner && a->rect.object==next.rect.object &&
+           a->rect.plane==next.rect.plane && a->rect.x_step==next.rect.x_step && a->rect.y_step==next.rect.y_step &&
+           a->rect.owner_required==next.rect.owner_required &&
+           a->rect.source_y+(a->rect.y1-a->rect.y0)*a->rect.y_step==next.rect.source_y) {
+            a->rect.y1=next.rect.y1;return true;
+        }
     }
-    if(plan->count==capacity)return false;
+    if(plan->count==c->capacity)return false;
+    c->merge_mark[key]=c->merge_stamp;c->merge_draw[key]=plan->count;
     draws[plan->count++]=next;return true;
 }
 SnesRecompPpuResult snesrecomp_ppu_indexed_draw_prepare(SnesRecompIndexedDrawCache *c,
@@ -165,6 +196,7 @@ SnesRecompPpuResult snesrecomp_ppu_indexed_draw_prepare(SnesRecompIndexedDrawCac
     for(unsigned p=0;p<l->plane_count;++p) {
         if((l->source_layers[p]==4)!=(phase==1))continue;
         if(l->source_layers[p]==4) {
+            if(++c->row_stamp==0){memset(c->row_mark,0,sizeof c->row_mark);c->row_stamp=1;}
             for(unsigned i=0;i<l->obj_run_count;++i) {
                 const SnesRecompPpuObjRun *r=l->obj_runs+i;const SnesRecompObjSliver *s=&r->sliver;
                 if(!(r->flags&SNESRECOMP_OBJ_RUN_OVERLAY)) continue;
@@ -177,7 +209,10 @@ SnesRecompPpuResult snesrecomp_ppu_indexed_draw_prepare(SnesRecompIndexedDrawCac
                 const uint16_t depth=(uint16_t)(((s->priority*4u+2u)<<12)|((s->math_eligible?4u:6u)<<8));
                 const Source next={(uint16_t)begin,s->line,(uint16_t)end,(uint16_t)(s->line+1u),
                     depth,bg->classes[slot],s->oam_slot,r->owner,c->line_band[s->line],s->palette_base,(uint8_t)p};
+                const unsigned key=(s->oam_slot&127u)*4u+((unsigned)begin>>3&3u);
+                if(ExtendObjectRow(c,next,key,&links)) continue;
                 if(!AddSource(c,next,&sources,&links,NULL)) return SNESRECOMP_PPU_RESOURCE_LIMIT;
+                if(next.x0<next.x1 && next.classes) {c->row_mark[key]=c->row_stamp;c->row_source[key]=sources-1u;}
             }
         } else for(unsigned i=0;i<bg->quad_count;++i) {
             const SnesRecompIndexedTileQuad *q=bg->quads+i;
@@ -225,10 +260,10 @@ SnesRecompPpuResult snesrecomp_ppu_indexed_draw_prepare(SnesRecompIndexedDrawCac
             plan.count+=count;
         } else for(unsigned i=0;i<projection->count;++i) {
             const SnesRecompIndexedProjectionRect *r=projection->rects+i;if(r->plane!=p)continue;
-            const unsigned first=plan.count;
+            if(++c->merge_stamp==0){memset(c->merge_mark,0,sizeof c->merge_mark);c->merge_stamp=1;}
             if(r->x0>=r->x1 || r->y0>=r->y1 || r->x_step>1 || r->y_step>1) return SNESRECOMP_PPU_INVALID;
-            const unsigned sx1=r->source_x+(r->x_step?r->x1-r->x0:1u),
-                sy1=r->source_y+(r->y_step?r->y1-r->y0:1u);
+            const unsigned sx1=r->source_x+(r->x_step?(unsigned)(r->x1-r->x0):1u),
+                sy1=r->source_y+(r->y_step?(unsigned)(r->y1-r->y0):1u);
             if(sx1>512 || sy1>256) return SNESRECOMP_PPU_INVALID;
             if(++c->stamp==0){memset(c->seen,0,sizeof c->seen);c->stamp=1;}
             for(unsigned y=r->source_y/8u;y<=(sy1-1u)/8u;++y)
@@ -245,7 +280,7 @@ SnesRecompPpuResult snesrecomp_ppu_indexed_draw_prepare(SnesRecompIndexedDrawCac
                 for(unsigned index=1;index<16;++index) if(s->classes&(1u<<index)) {
                     const SnesRecompIndexedDraw next={clipped,(uint16_t)(s->priority+s->palette+index),
                         (uint16_t)material,l->source_layers[p]==4?s->winner:r->owner,(uint8_t)(s->palette+index),0};
-                    if(!AppendDraw(draws,&plan,first,c->capacity,next))return SNESRECOMP_PPU_RESOURCE_LIMIT;
+                    if(!AppendDraw(c,draws,&plan,next))return SNESRECOMP_PPU_RESOURCE_LIMIT;
                 }
             }
         }

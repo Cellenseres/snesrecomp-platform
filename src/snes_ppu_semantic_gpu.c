@@ -1,4 +1,5 @@
 #include "snesrecomp_platform/snes_ppu_semantic_gpu.h"
+#include "snes_ppu_windows.h"
 
 #include <string.h>
 
@@ -131,6 +132,13 @@ static void AddEdge(int *edges, unsigned *count, int edge, unsigned width) {
     memmove(edges + pos + 1, edges + pos, (*count - pos) * sizeof(*edges));
     edges[pos] = edge;
     ++*count;
+}
+
+bool snesrecomp_ppu_window_spans_equal(const SnesPpuFrameCapture *cap,
+    unsigned a, unsigned b) {
+    return cap && a < cap->band_count && b < cap->band_count &&
+        snesrecomp_ppu_windows_equal(cap->bands + a, cap->bands + b) &&
+        snesrecomp_ppu_resolved_windows_equal(cap, a, b);
 }
 
 unsigned snesrecomp_ppu_window_spans(const SnesPpuFrameCapture *cap,

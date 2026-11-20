@@ -232,6 +232,12 @@ typedef struct SnesPpuFrameCapture {
     uint16_t obj_pitch;          /* uint16_t elements per visible row */
     /* Optional game-resolved windows, six layers per raster band. */
     const SnesPpuResolvedWindow *resolved_windows;
+    /* Optional producer stamps for obj_pixels: row y was last written at
+     * obj_row_serials[y], and this capture is obj_serial. A frame skips
+     * comparing rows not written since its previous freeze of the same rows.
+     * Frozen frames never pass these on. */
+    const uint64_t *obj_row_serials;
+    uint64_t obj_serial;
 } SnesPpuFrameCapture;
 
 enum {

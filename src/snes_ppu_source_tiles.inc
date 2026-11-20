@@ -82,20 +82,22 @@ static bool SourcePiece(SnesRecompColourTileCache *c,SnesRecompTilePlan *out,
     const SnesRecompTileQuad *q,int x0,int y0,int x1,int y1) {
     if(x0>=x1 || y0>=y1) return true;
     if(out->quad_count==SNESRECOMP_TILE_PLAN_QUADS) return false;
-    SnesRecompTileQuad piece=*q;
+    SnesRecompTileQuad *const piece=c->quads+out->quad_count++;
+    piece->slot=q->slot;piece->pass=q->pass;piece->reserved=q->reserved;
+    piece->u0=q->u0;piece->u1=q->u1;
     /* Native repeated columns retain their single source texel. All other
      * native axes are one-to-one, including reversed UVs. */
     if(abs((int)q->u1-q->u0)==q->x1-q->x0) {
         const int direction=q->u1>q->u0?1:-1;
-        piece.u0=(uint8_t)(q->u0+direction*(x0-q->x0));
-        piece.u1=(uint8_t)(q->u0+direction*(x1-q->x0));
+        piece->u0=(uint8_t)(q->u0+direction*(x0-q->x0));
+        piece->u1=(uint8_t)(q->u0+direction*(x1-q->x0));
     }
     const int direction=q->v1>q->v0?1:-1;
-    piece.v0=(uint8_t)(q->v0+direction*(y0-q->y0));
-    piece.v1=(uint8_t)(q->v0+direction*(y1-q->y0));
-    piece.x0=(int16_t)x0;piece.x1=(int16_t)x1;
-    piece.y0=(int16_t)y0;piece.y1=(int16_t)y1;
-    c->quads[out->quad_count++]=piece;return true;
+    piece->v0=(uint8_t)(q->v0+direction*(y0-q->y0));
+    piece->v1=(uint8_t)(q->v0+direction*(y1-q->y0));
+    piece->x0=(int16_t)x0;piece->x1=(int16_t)x1;
+    piece->y0=(int16_t)y0;piece->y1=(int16_t)y1;
+    return true;
 }
 static bool SourceClipNative(SnesRecompColourTileCache *c,SnesRecompTilePlan *out,
     const SnesRecompTileQuad *q,unsigned layer,bool sub) {
@@ -104,7 +106,7 @@ static bool SourceClipNative(SnesRecompColourTileCache *c,SnesRecompTilePlan *ou
         const uint16_t *row=c->source_rows[sub][layer][y];
         unsigned end=y+1;
         while(end<(unsigned)q->y1 && c->source_row_counts[sub][layer][end]==count &&
-            !memcmp(row,c->source_rows[sub][layer][end],count*sizeof(*row))) ++end;
+            snesrecomp_ppu_words_equal(row,c->source_rows[sub][layer][end],count)) ++end;
         int left=q->x0;
         for(unsigned i=0;i<count && left<q->x1;++i) {
             const SnesRecompPpuSource *r=c->source_job->sources+row[i];
@@ -123,10 +125,23 @@ static bool DrawSources(SnesRecompColourTileCache *c,const SnesPpuFrameCapture *
     SnesRecompTilePlan *out) {
     const SnesRecompPpuJobView *job=c->source_job;
     if(!job) return true;
+    /* Ordered bands let each source start at its first overlapping band. */
+    bool ordered=true;
+    for(unsigned bi=1;ordered && bi<cap->band_count;++bi)
+        ordered=cap->bands[bi-1u].y_end<=cap->bands[bi].y_begin;
     for(unsigned i=0;i<job->source_count;++i) {
         const SnesRecompPpuSource *r=job->sources+i;
-        for(unsigned bi=0;bi<cap->band_count;++bi) {
+        unsigned first_band=0;
+        if(ordered) {
+            unsigned high=cap->band_count;
+            while(first_band<high) {
+                const unsigned middle=(first_band+high)/2u;
+                if(cap->bands[middle].y_end<=r->y) first_band=middle+1u;else high=middle;
+            }
+        }
+        for(unsigned bi=first_band;bi<cap->band_count;++bi) {
             const SnesPpuRasterBand *band=cap->bands+bi;
+            if(ordered && band->y_begin>=r->y+r->height) break;
             if(band->forced_blank || band->y_end<=r->y || band->y_begin>=r->y+r->height) continue;
             const unsigned begin=band->y_begin>r->y?band->y_begin:r->y;
             const unsigned end=band->y_end<r->y+r->height?band->y_end:r->y+r->height;
@@ -166,6 +181,65 @@ static bool DrawSources(SnesRecompColourTileCache *c,const SnesPpuFrameCapture *
                         }
                         y+=h;
                     }
+                }
+            }
+        }
+    }
+    return true;
+}
+/* Same sources, bands, screens, spans and passes as DrawSources, one
+ * rectangle each. False when a source needs the clipped-black colours. */
+static bool DrawSourceImages(SnesRecompColourTileCache *c,const SnesPpuFrameCapture *cap) {
+    const SnesRecompPpuJobView *job=c->source_job;
+    c->image_quad_count=0;
+    if(!job) return true;
+    bool ordered=true;
+    for(unsigned bi=1;ordered && bi<cap->band_count;++bi)
+        ordered=cap->bands[bi-1u].y_end<=cap->bands[bi].y_begin;
+    for(unsigned i=0;i<job->source_count;++i) {
+        const SnesRecompPpuSource *r=job->sources+i;
+        /* One image of at most 512x256 keeps backends to a single texture. */
+        if(r->image || !job->image_count || job->images[0].width>512u || job->images[0].height>256u)
+            return false;
+        unsigned first_band=0;
+        if(ordered) {
+            unsigned high=cap->band_count;
+            while(first_band<high) {
+                const unsigned middle=(first_band+high)/2u;
+                if(cap->bands[middle].y_end<=r->y) first_band=middle+1u;else high=middle;
+            }
+        }
+        for(unsigned bi=first_band;bi<cap->band_count;++bi) {
+            const SnesPpuRasterBand *band=cap->bands+bi;
+            if(ordered && band->y_begin>=r->y+r->height) break;
+            if(band->forced_blank || band->y_end<=r->y || band->y_begin>=r->y+r->height) continue;
+            const unsigned begin=band->y_begin>r->y?band->y_begin:r->y;
+            const unsigned end=band->y_end<r->y+r->height?band->y_end:r->y+r->height;
+            for(unsigned sub=0;sub<2;++sub) {
+                if(!(r->screens&(1u<<sub)) || !((sub?band->sub_enable:band->main_enable)&(1u<<r->layer)) ||
+                    (sub && !(band->cgwsel&2u))) continue;
+                for(unsigned si=0;si<c->window_counts[bi];++si) {
+                    const SnesRecompWindowSpan *span=c->windows[bi]+si;
+                    if(!(span->mask&(1u<<(r->layer+sub*3u)))) continue;
+                    if(!sub && !(span->mask&SNESRECOMP_SEMANTIC_MAIN_RGB)) return false;
+                    const unsigned left=span->begin>r->x?span->begin:r->x;
+                    const unsigned right=span->end<r->x+r->width?span->end:r->x+r->width;
+                    if(left>=right) continue;
+                    unsigned rank=r->layer==0?(r->priority?5u:3u):
+                        r->layer==1?(r->priority?4u:2u):
+                        r->priority?(band->bg3_priority?6u:1u):0u;
+                    const unsigned pass=sub?SNESRECOMP_RAW_TILE_MAIN_PASSES+rank:
+                        rank*2u+!!((span->mask&SNESRECOMP_SEMANTIC_MATH) && (band->cgadsub&(1u<<r->layer)));
+                    const unsigned sx=r->source_x+(r->source_width==1?0u:left-r->x);
+                    const unsigned sy=r->source_y+(r->source_height==1?0u:begin-r->y);
+                    if(c->image_quad_count==SNESRECOMP_IMAGE_QUADS) return false;
+                    c->image_quads[c->image_quad_count++]=(SnesRecompImageQuad){
+                        (int16_t)left,(int16_t)begin,(int16_t)right,(int16_t)end,
+                        (uint16_t)(r->source_width==1?sx*2u+1u:sx*2u),
+                        (uint16_t)(r->source_height==1?sy*2u+1u:sy*2u),
+                        (uint16_t)(r->source_width==1?sx*2u+1u:(sx+right-left)*2u),
+                        (uint16_t)(r->source_height==1?sy*2u+1u:(sy+end-begin)*2u),
+                        r->image,(uint8_t)pass,0};
                 }
             }
         }

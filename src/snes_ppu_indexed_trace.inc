@@ -75,8 +75,10 @@ static bool WriteIndexedTrace(const char *path,const SnesRecompPpuJobView *v,
     PutU32(&p,objects[0]?objects[0]->count:0);PutU32(&p,objects[1]?objects[1]->count:0);
     PutU64(&p,v->sequence);PutU64(&p,hash);PutU32(&p,flags);PutU16(&p,l->width);PutU16(&p,l->height);
     PutU8(&p,l->plane_count);PutU8(&p,l->owner_planes);PutU16(&p,l->reserved);
-    for(unsigned i=0;i<5;++i) PutU8(&p,l->source_layers[i]);PutU8(&p,0);PutU16(&p,0);
-    for(unsigned i=0;i<8;++i) PutU32(&p,l->qualified_lines[i]);PutU32(&p,0);
+    for(unsigned i=0;i<5;++i) PutU8(&p,l->source_layers[i]);
+    PutU8(&p,0);PutU16(&p,0);
+    for(unsigned i=0;i<8;++i) PutU32(&p,l->qualified_lines[i]);
+    PutU32(&p,0);
     if((size_t)(p-buf)!=TRACE_INDEXED_HEADER_BYTES) {free(buf);return false;}
     return WriteBuffer(path,buf,bytes);
 }

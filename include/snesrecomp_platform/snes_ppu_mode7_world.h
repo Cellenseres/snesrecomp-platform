@@ -9,6 +9,8 @@ extern "C" {
 #endif
 
 enum { SNESRECOMP_MODE7_WORLD_SIDE = 1024, SNESRECOMP_MODE7_WORLD_CELLS = 128 * 128 };
+enum { SNESRECOMP_MODE7_SCREEN_WIDTH = 512, SNESRECOMP_MODE7_SCREEN_HEIGHT = 256,
+       SNESRECOMP_MODE7_SCREEN_CELLS = (512 / 8) * (256 / 8) };
 typedef struct SnesRecompMode7WorldCache SnesRecompMode7WorldCache;
 typedef struct SnesRecompMode7WorldPlan {
     /* Two precoloured planes: ordinary BG1, and exact fixed-colour math.
@@ -17,6 +19,11 @@ typedef struct SnesRecompMode7WorldPlan {
      * Identical planes may alias; consumers must keep both views read-only. */
     const uint32_t *pixels[2];
     const uint64_t *versions[2];
+    /* A world cell's version is the larger of versions[v][cell] and
+     * character_versions[v][map[cell]]: recolouring a character raises one
+     * version instead of every cell showing it. Both are NULL for screen planes. */
+    const uint8_t *map;
+    const uint64_t *character_versions[2];
     const SnesRecompMode7Line *lines;
     uint32_t changed_cells[2];
     uint64_t resource_generation[2];
@@ -33,6 +40,11 @@ typedef struct SnesRecompMode7WorldPlan {
      * NULL/zero denotes a legacy plan without this certificate. */
     const uint32_t *sampled_cells[2];
     uint64_t sampled_geometry_generation;
+    /* Nonzero: pixels and versions are screen-space planes of
+     * SNESRECOMP_MODE7_SCREEN_WIDTH x HEIGHT (64x32 cells), already sampled
+     * exactly. Spans read them 1:1 in a 1024-unit coordinate space scaled by
+     * two horizontally and four vertically. Every screen cell is resident. */
+    uint32_t screen;
 } SnesRecompMode7WorldPlan;
 typedef struct SnesRecompMode7WorldGeometry {
     const SnesRecompMode7WorldSpan *spans;
@@ -58,6 +70,11 @@ SnesRecompPpuResult snesrecomp_mode7_world_prepare_raw(SnesRecompMode7WorldCache
  * Captures and geometry retain their original semantics and ownership. */
 SnesRecompPpuResult snesrecomp_mode7_world_prepare_view(SnesRecompMode7WorldCache *cache,
     const SnesRecompPpuFrame *frame, bool raw, SnesRecompMode7WorldPlan *out,
+    SnesRecompMode7WorldGeometry *geometry);
+/* Like the composed view, but every band at brightness 15. Only for a backend
+ * that applies the frame's single uniform brightness to the finished image. */
+SnesRecompPpuResult snesrecomp_mode7_world_prepare_unshaded_view(SnesRecompMode7WorldCache *cache,
+    const SnesRecompPpuFrame *frame, SnesRecompMode7WorldPlan *out,
     SnesRecompMode7WorldGeometry *geometry);
 /* Bounded, integer-prepared affine strips. Sampling bias preserves every
  * source texel while leaving >=1/16 source pixel of precision reserve.

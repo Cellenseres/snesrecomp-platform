@@ -101,6 +101,8 @@ SnesRecompPpuResult snesrecomp_ppu_job_freeze_sources(SnesRecompPpuJob *job,
 /* Reuse the already owned art, rectangles and conditions with another complete
  * frame of identical canvas dimensions. This deliberately does not consult
  * borrowed art or change a backdrop key. Use freeze when any overlay changes.
+ * Also accepts a successfully frozen ordinary payload after detach_frame.
+ * Primitive/indexed source contexts are refused, including empty primitives.
  * Constant work, no allocation or pixel comparison. Failure is transactional;
  * a presenter-retained job remains busy until submission/cancellation. */
 SnesRecompPpuResult snesrecomp_ppu_job_rebind(SnesRecompPpuJob *job,

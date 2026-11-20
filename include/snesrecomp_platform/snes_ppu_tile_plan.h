@@ -12,7 +12,10 @@ extern "C" {
 enum {
     SNESRECOMP_COLOUR_TILE_SLOTS = 8192,
     SNESRECOMP_TILE_PLAN_QUADS = 16384,
-    SNESRECOMP_TILE_PLAN_PASSES = 7
+    SNESRECOMP_TILE_PLAN_PASSES = 7,
+    SNESRECOMP_PLANE_TILES = 64 * 64,
+    SNESRECOMP_PLANE_QUADS = 4096,
+    SNESRECOMP_IMAGE_QUADS = 4096
 };
 typedef struct SnesRecompTilePlan {
     const SnesRecompTileQuad *quads;
@@ -31,13 +34,53 @@ typedef struct SnesRecompTilePlan {
     uint64_t geometry_generation, object_generation;
     uint16_t width, height;
     SnesPpuUnsupported unsupported;
+    /* Raw plans with planes enabled. plane_tiles build a map whose
+     * pass is the tile priority; plane_quads sample it. */
+    const SnesRecompTileQuad *plane_tiles;
+    const SnesRecompPlaneQuad *plane_quads;
+    uint32_t plane_tile_count, plane_quad_count;
+    uint16_t plane_width, plane_height;
+    uint64_t plane_tile_generation;
+    /* With planes enabled, owned job art is sampled directly instead of
+     * being cut into atlas tiles. Images stay valid until submit. */
+    const SnesRecompImageQuad *image_quads;
+    uint32_t image_quad_count;
+    const SnesRecompPpuJobImage *images;
+    const uint64_t *image_versions;
+    uint64_t image_owner;
+    uint16_t image_count;
+    /* Below 15, the plan is unshaded and the backend must apply this master
+     * brightness to the whole image. Only after enable_post_brightness. */
+    uint8_t shade_brightness;
 } SnesRecompTilePlan;
 typedef struct SnesRecompColourTileCache SnesRecompColourTileCache;
+
+/* Shared atlas preparation for unshaded backgrounds and qualified OBJ
+ * geometry. No sprite selection, pixel-plane generation or GPU work. All
+ * returned pointers belong to the cache until its next preparation/reset.
+ * A failed preparation is not executable; the conservative CPU path remains.
+ * Source replacements are optional and must belong to this exact frame. */
+typedef struct SnesRecompObjTileScenePlan {
+    SnesRecompTilePlan background;
+    const uint16_t *obj_slots;
+    uint32_t obj_count,obj_tiles_decoded,obj_cache_hits;
+} SnesRecompObjTileScenePlan;
+SnesRecompPpuResult snesrecomp_ppu_mode1_obj_scene(
+    SnesRecompColourTileCache *cache,const SnesRecompPpuFrame *frame,
+    const SnesRecompPpuJob *sources,const SnesRecompPpuObjRun *runs,
+    uint32_t count,SnesRecompObjTileScenePlan *out);
 
 SnesRecompColourTileCache *snesrecomp_colour_tiles_create(void);
 void snesrecomp_colour_tiles_destroy(SnesRecompColourTileCache *cache);
 void snesrecomp_colour_tiles_reset(SnesRecompColourTileCache *cache);
 void snesrecomp_colour_tiles_uploaded(SnesRecompColourTileCache *cache);
+/* Lets raw plans emit plane_tiles/plane_quads. Only for backends that draw
+ * them; false when the plane state cannot be allocated. */
+bool snesrecomp_colour_tiles_enable_planes(SnesRecompColourTileCache *cache);
+/* Lets direct plans with one master brightness below 15 report
+ * shade_brightness instead of baking it into tiles. False when the band
+ * copy cannot be allocated; plans then stay shaded. */
+bool snesrecomp_colour_tiles_enable_post_brightness(SnesRecompColourTileCache *cache);
 /* No GPU writes or display side effects; partial plans are never executable. */
 SnesRecompPpuResult snesrecomp_ppu_tile_plan(SnesRecompColourTileCache *cache,
     const SnesRecompPpuFrame *frame, SnesRecompTilePlan *out);

@@ -1,5 +1,6 @@
 #include "snesrecomp_platform/snes_ppu_image_certificate.h"
 #include "snesrecomp_platform/memory_compare.h"
+#include "snesrecomp_platform/snes_ppu_frame_key.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,7 +16,10 @@ struct SnesRecompPpuImageCertificate {
     uint64_t owner, geometry, indexed_objects;
     uint32_t primitives;
     uint16_t materials;
-    bool valid, indexed;
+    bool valid, indexed, resolved;
+    SnesRecompPpuFrameKey *resolved_frame;
+    uint64_t image_versions[SNESRECOMP_PPU_JOB_MAX_IMAGES];
+    uint16_t images, overlays, sources;
 };
 
 static bool Admitted(const SnesRecompPpuJobView *v) {
@@ -33,6 +37,15 @@ static bool Admitted(const SnesRecompPpuJobView *v) {
     return true;
 }
 
+/* Completed ordinary jobs include their post overlays and resolved BG art.
+ * Freeze owns every byte and advances geometry/image versions transactionally.
+ * Sliver-backed frames remain excluded by the full frame certificate. */
+static bool ResolvedAdmitted(const SnesRecompPpuJobView *v) {
+    return v && v->frame && !v->graphics_frame && !v->indexed_layout &&
+        !v->primitive_count && !v->material_count && !v->blits &&
+        v->image_count<=SNESRECOMP_PPU_JOB_MAX_IMAGES &&
+        (!v->image_count || v->image_versions);
+}
 static bool Matches(const ImageFrame *image,const SnesRecompPpuFrame *frame) {
     const SnesPpuFrameCapture *c=snesrecomp_ppu_frame_capture(frame);
     const SnesRecompPpuFrameVersions *v=snesrecomp_ppu_frame_versions(frame);
@@ -56,13 +69,26 @@ static void Record(ImageFrame *image,const SnesRecompPpuFrame *frame) {
 }
 
 SnesRecompPpuImageCertificate *snesrecomp_ppu_image_certificate_create(void) {
-    return calloc(1,sizeof(SnesRecompPpuImageCertificate));
+    SnesRecompPpuImageCertificate *c=calloc(1,sizeof *c);
+    if(c) c->resolved_frame=snesrecomp_ppu_frame_key_create();
+    return c;
 }
-void snesrecomp_ppu_image_certificate_destroy(SnesRecompPpuImageCertificate *c) {free(c);}
+void snesrecomp_ppu_image_certificate_destroy(SnesRecompPpuImageCertificate *c) {
+    if(c) {snesrecomp_ppu_frame_key_destroy(c->resolved_frame);free(c);}
+}
 void snesrecomp_ppu_image_certificate_invalidate(SnesRecompPpuImageCertificate *c) {if(c)c->valid=false;}
 bool snesrecomp_ppu_image_certificate_matches(const SnesRecompPpuImageCertificate *c,
     const SnesRecompPpuJob *job) {
     const SnesRecompPpuJobView *v=snesrecomp_ppu_job_view(job);
+    if(c && c->valid && c->resolved) {
+        if(!ResolvedAdmitted(v) || c->owner!=v->owner ||
+            c->geometry!=v->geometry_version || c->images!=v->image_count ||
+            c->overlays!=v->overlay_count || c->sources!=v->source_count ||
+            !snesrecomp_ppu_frame_key_matches(c->resolved_frame,v->frame)) return false;
+        for(unsigned i=0;i<v->image_count;++i)
+            if(c->image_versions[i]!=v->image_versions[i]) return false;
+        return true;
+    }
     return c && c->valid && Admitted(v) && c->owner==v->owner &&
         c->indexed==(v->indexed_layout!=NULL) &&
         c->geometry==(c->indexed?v->indexed_geometry_version:v->primitive_geometry_version) &&
@@ -73,6 +99,15 @@ bool snesrecomp_ppu_image_certificate_commit(SnesRecompPpuImageCertificate *c,
     const SnesRecompPpuJob *job) {
     const SnesRecompPpuJobView *v=snesrecomp_ppu_job_view(job);
     if(!c) return false;
+    if(ResolvedAdmitted(v)) {
+        c->valid=false;
+        if(!snesrecomp_ppu_frame_key_commit(c->resolved_frame,v->frame)) return false;
+        c->owner=v->owner;c->geometry=v->geometry_version;
+        c->images=v->image_count;c->overlays=v->overlay_count;c->sources=v->source_count;
+        for(unsigned i=0;i<v->image_count;++i)c->image_versions[i]=v->image_versions[i];
+        c->resolved=c->valid=true;return true;
+    }
+    c->resolved=false;
     if(!Admitted(v)) {c->valid=false;return false;}
     /* Pixel-plane versions intentionally do not certify the optional sliver
      * list. Scan kinds only when committing; matching owned geometry versions
